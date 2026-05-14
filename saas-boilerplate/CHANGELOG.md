@@ -3,6 +3,15 @@
 All notable changes to the SaaS boilerplate are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] — 2026-01-XX
+
+### Fixed
+- `app/api/webhooks/clerk/route.ts` — `organizationMembership.deleted` was deleting all members for a tenant due to missing `userId` scope. Now correctly scopes by `(tenantId AND userId)` and guards against missing `organization.id` / `public_user_data.user_id`.
+- `app/admin/page.tsx` — removed `{void tenants}{void users}{void subscriptions}` placeholder JSX and the unused schema imports backing them.
+
+### Added
+- `scheduleTrialEndingReminders` — daily Inngest cron (`0 9 * * *` UTC) that queries `subscriptions` where `trial_ends_at` is within the next 3 days and `trial_reminder_sent_at IS NULL`, then fan-outs `billing/trial-ending` events. Idempotency continues to be enforced by `trial_reminder_sent_at` inside `trialEndingReminder`.
+
 ## [1.2.0] — 2026-01-XX
 
 Initial public boilerplate cut, implementing the v1.2 spec.

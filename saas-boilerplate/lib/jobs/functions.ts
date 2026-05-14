@@ -212,11 +212,41 @@ export const cleanupStripeEvents = inngest.createFunction(
   },
 );
 
+/* ------------------------------------------------------------------ */
+/* schedule-trial-ending-reminders — daily cron emits per-sub events   */
+/* ------------------------------------------------------------------ */
+export const scheduleTrialEndingReminders = inngest.createFunction(
+  { id: "schedule-trial-ending-reminders", concurrency: { limit: 1 }, retries: 2 },
+  { cron: "0 9 * * *" }, // daily 09:00 UTC
+  async ({ step }) => {
+    const ids = await step.run("find-subs", async () => {
+      const rows = await db.execute<{ id: string }>(sql`
+        SELECT id FROM subscriptions
+        WHERE trial_ends_at IS NOT NULL
+          AND trial_ends_at > NOW()
+          AND trial_ends_at < NOW() + INTERVAL '3 days'
+          AND trial_reminder_sent_at IS NULL
+      `);
+      return rows.rows.map((r) => r.id);
+    });
+    if (ids.length === 0) return { dispatched: 0 };
+    await step.sendEvent(
+      "fan-out",
+      ids.map((subscriptionId) => ({
+        name: "billing/trial-ending" as const,
+        data: { subscriptionId },
+      })),
+    );
+    return { dispatched: ids.length };
+  },
+);
+
 export const functions = [
   sendWelcomeEmail,
   provisionTenant,
   sendInviteEmail,
   trialEndingReminder,
+  scheduleTrialEndingReminders,
   handlePaymentFailed,
   cleanupStripeEvents,
 ];

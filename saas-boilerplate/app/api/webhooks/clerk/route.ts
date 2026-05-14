@@ -4,7 +4,7 @@ import type { WebhookEvent } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { users, tenants, tenantMembers } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { getEnv } from "@/lib/env";
 import { inngest } from "@/lib/jobs/client";
 import { logAudit } from "@/lib/audit/log";
@@ -106,6 +106,7 @@ export async function POST(req: Request) {
     }
     case "organizationMembership.deleted": {
       const m = evt.data;
+      if (!m.organization?.id || !m.public_user_data?.user_id) break;
       const [tenantRow] = await db
         .select({ id: tenants.id })
         .from(tenants)
@@ -117,10 +118,14 @@ export async function POST(req: Request) {
         .where(eq(users.clerkUserId, m.public_user_data.user_id))
         .limit(1);
       if (tenantRow && userRow) {
+        // Scope by BOTH tenantId AND userId — never cascade-delete a tenant's members.
         await db
           .delete(tenantMembers)
           .where(
-            eq(tenantMembers.tenantId, tenantRow.id),
+            and(
+              eq(tenantMembers.tenantId, tenantRow.id),
+              eq(tenantMembers.userId, userRow.id),
+            ),
           );
       }
       break;
