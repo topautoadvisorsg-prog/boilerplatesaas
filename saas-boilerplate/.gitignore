@@ -1,12 +1,23 @@
+cat > .gitignore << 'EOF'
 node_modules
 .next
+.turbo
+.vercel
+
 .env
+.env.*
 .env.local
 .env*.local
-.vercel
+backend/.env
+frontend/.env
+.sentryclirc
+
 *.log
 .DS_Store
 coverage
-.turbo
 next-env.d.ts
-.sentryclirc
+
+yarn.lock
+frontend/yarn.lock
+saas-boilerplate/yarn.lock
+EOF
