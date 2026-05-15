@@ -310,7 +310,31 @@ Use [ngrok](https://ngrok.com) or [Cloudflare Tunnel](https://developers.cloudfl
 ---
 ## Troubleshooting
 
-Concrete failures, in priority order. Most issues will be one of these.
+### Quick "where do I look?" table
+
+| Symptom | First file to open |
+|---|---|
+| App won't boot, env error | `lib/env.ts` (validates env), `.env.local` |
+| Sign-in/sign-up issue | `middleware.ts`, `lib/auth/current-user.ts`, Clerk dashboard |
+| Wrong user after login | `lib/auth/current-user.ts` (`requireAppUser`) |
+| Tenant routing broken | `middleware.ts` (subdomain extraction), `lib/db/with-tenant.ts` (`resolveTenantForUser`) |
+| Cross-tenant data leak | `drizzle/rls.sql`, any service in `lib/services/` not using `withTenant()` |
+| Onboarding fails | `lib/services/tenantService.ts` (`createTenant`), `app/onboarding/actions.ts` |
+| Invite/accept broken | `lib/services/inviteService.ts`, `app/(tenant)/team/actions.ts`, `app/accept-invite/[token]/actions.ts` |
+| Stripe checkout/portal broken | `lib/services/billingService.ts`, `app/(tenant)/billing/actions.ts`, `lib/billing/stripe.ts` |
+| Stripe webhook bug | `app/api/webhooks/stripe/route.ts` (gate), `lib/services/subscriptionService.ts` (logic) |
+| Clerk webhook bug | `app/api/webhooks/clerk/route.ts` (gate), `lib/services/userService.ts` + `tenantService.ts` (logic) |
+| Background job not running | `lib/jobs/functions.ts`, `lib/jobs/client.ts`, `app/api/inngest/route.ts` |
+| Email not sending / wrong content | `lib/email/client.ts` (transport), `lib/email/templates.ts` (copy) |
+| Plan/feature gate wrong | `lib/config/billing.ts` (`canUseFeature`, plan limits) |
+| Feature flag not toggling | `lib/config/features.ts` |
+| Branding string showing wrong | `lib/config/app.ts` + `NEXT_PUBLIC_APP_*` env vars |
+| Admin UI bug | `app/admin/*`, `components/admin/*`, `components/ui/*` |
+| Audit log missing entries | `lib/audit/log.ts`, `lib/audit/actions.ts` (enum) |
+| DB schema mismatch | `lib/db/schema.ts` → re-run `pnpm db:generate && pnpm db:migrate` |
+| RLS blocking valid query | `drizzle/rls.sql`, confirm caller wraps in `withTenant()` |
+
+### Concrete failures, in priority order
 
 ### App refuses to start: `Invalid or missing environment variables`
 - **Cause**: `lib/env.ts` Zod validation failed at boot.
