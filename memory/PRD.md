@@ -1,53 +1,75 @@
-# PRD — SaaS Boilerplate (v1.2)
+# PRD — White-Label SaaS Engine
 
 ## Original problem statement
-> Create a boilerplate from the attached blueprint (`saas-boilerplate-spec-v1.2.md.pdf`). Review the blueprint, call out issues, then build. The eventual product on top will be a flash-cards app, but the boilerplate itself is white-label.
+> Create a boilerplate from the v1.2 spec. Eventual product on top will be flash-cards, but the boilerplate itself must be product-agnostic.
 
-## User choices (captured)
-- **Stack**: Keep Next.js 15 / Neon Postgres / Clerk as spec'd (delivered as code in `/app/saas-boilerplate/`; not running in Emergent preview).
-- **Auth**: Email/password + Google OAuth (both via Clerk).
-- **Billing**: Stripe code present, but no test keys wired; placeholder env vars + clear setup docs.
-- **Email**: Stubbed (console logger) — README explains the one-function swap to Resend.
-- **Sentry**: Included (client, server, edge configs + `onRequestError`).
-- **Flash-cards module**: deferred — boilerplate is white-label.
+## Architecture (v1.3 — hardened)
 
-## Architecture
-- Next.js 15 App Router, TypeScript strict
-- Edge middleware: subdomain → `x-tenant-slug`, Clerk auth
-- Postgres (Neon) + Drizzle ORM; `withTenant()` helper + RLS policies on tenant-scoped tables
-- Server actions for mutations; API routes for webhooks (Clerk/Stripe/Inngest)
-- Inngest background jobs, idempotent via `*_sent_at` columns and `processed_stripe_events`
-- Sentry across runtimes
+Three-layer separation:
 
-## Implemented (v1.2.0, 2026-01)
-- Full Drizzle schema with v1.2 idempotency fields
-- `lib/env.ts` (Zod) + `instrumentation.ts` for fail-fast boot
+```
+app/          ← interface layer (pages, server actions, webhook routes)
+lib/services/ ← business logic (tenant, user, invite, billing, subscription)
+lib/config/   ← product identity (app, billing, features) — ONE place to fork
+lib/db/       ← schema, withTenant(), Drizzle client
+```
+
+### Hard rules enforced
+1. `app/` contains no business logic — only request parsing, response shaping, and redirects.
+2. `lib/services/` owns every DB mutation and every external-API call.
+3. `lib/config/` is the only place product identity exists. Branding, plan catalog, and feature toggles all live here.
+4. No file under `app/` or `lib/` references "SaaS Boilerplate" or any product-specific term (grep verified).
+5. Every tenant-scoped mutation runs inside `withTenant()`; RLS enforces it at the DB.
+
+## Implemented
+
+### v1.3.0 — White-label hardening (current)
+- `lib/config/{app,billing,features}.ts` — identity, plan catalog, runtime flags
+- `lib/services/{tenant,user,invite,billing,subscription}Service.ts` — business logic extracted from actions/webhooks
+- Server actions reduced to ~15-30-line thin wrappers
+- Webhook routes reduced to signature-verify + idempotency-gate + delegate
+- Feature flags applied: admin can 404, billing tab hides, invite UI hides, email can stay stubbed
+- Email transport: real Resend when `FEATURE_EMAIL_ENABLED=1`, stub otherwise (SDK lazy-imported)
+- Branding read from `appConfig` everywhere (layout metadata, marketing page, Inngest app id)
+
+### v1.2.1 — Critical fixes
+- Clerk `organizationMembership.deleted` properly scoped by `(tenantId, userId)`
+- Admin page placeholder JSX cleaned
+- Trial-ending reminder cron registered (daily 09:00 UTC)
+
+### v1.2.0 — Initial cut
+- Full Drizzle schema with v1.2 idempotency columns
 - `withTenant()` + `drizzle/rls.sql` + `scripts/apply-rls.ts`
-- Plans matrix (Free / Pro $49 / Enterprise $199) + DB-only plan reads + lapsed-state read-only
-- Audit log enum (`AUDIT_ACTIONS`) + writer
+- Stripe atomic-idempotent webhook via `processed_stripe_events`
+- Clerk webhook with Svix verification
+- 7 Inngest jobs (welcome, provision, invite, trial-ending + cron, payment-failed, cleanup)
+- Pages: marketing root, sign-in/up, onboarding (atomic Clerk+DB rollback), tenant dashboard/team/billing/settings, admin (overview/tenants/users/detail), accept-invite
+- Sentry across client/server/edge + onRequestError
 - Postgres-backed invite rate limit (10/tenant/hr)
-- Email client (stub) + 5 templates
-- 6 Inngest functions (welcome, provision, invite, trial-ending, payment-failed, cleanup)
-- Middleware (Clerk + subdomain) with proper matcher
-- Sentry 3 configs + `onRequestError`
-- Webhooks: Clerk (Svix), Stripe (atomic idempotency), Inngest
-- Pages: marketing root, sign-in/up, onboarding (Clerk+DB atomic with rollback), tenant dashboard/team/billing/settings, admin (overview/tenants/users/detail), accept-invite
-- Server actions: createOrg, invite, removeMember, acceptInvite, startCheckout, openBillingPortal
-- README (full setup walkthrough), CHANGELOG, .env.example, .gitignore
 
 ## Quality gates
-- `tsc --noEmit`: **zero errors**
-- `eslint`: **zero errors, zero warnings**
-- No `any` types
-- All env vars validated at boot
+- `tsc --noEmit` → **0 errors**
+- `eslint` → **0 errors, 0 warnings**
+- Branding grep → clean
+- Raw-DB-in-pages grep → clean (pages either use services or `withTenant()`)
 
-## Backlog / next tasks
-- **P0**: User to provision Clerk, Neon, Stripe (test), Inngest, Sentry accounts and fill `.env.local`.
-- **P1**: Swap email stub → Resend (one function in `lib/email/client.ts`).
-- **P1**: Add E2E smoke tests (Playwright) for the Phase 0 checklist in README.
-- **P2**: Build flash-cards product module on top (decks, cards, SM-2 spaced repetition, study stats).
-- **P2**: Audit log export endpoint (Enterprise plan gate).
-- **P3**: Marketing site (separate repo per spec).
+## Forking for a new product
+
+To start any new SaaS on top of this engine:
+
+1. Set `NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_APP_DESCRIPTION`, `NEXT_PUBLIC_APP_HEADLINE`, `NEXT_PUBLIC_APP_SUBHEAD`, `NEXT_PUBLIC_APP_SLUG`, `NEXT_PUBLIC_SUPPORT_EMAIL` in `.env.local`.
+2. (Optional) Edit `lib/config/billing.ts` for custom plan catalog.
+3. (Optional) Toggle features in `lib/config/features.ts`.
+4. Build product features as new routes under `app/(tenant)/<feature>/` + new services under `lib/services/<feature>Service.ts`. Never touch the core auth/tenant/billing/webhook surface.
+
+## Next tasks
+- **P0**: User provisions Clerk, Neon, Stripe (test), Inngest, Sentry; fills `.env.local`; runs `pnpm db:migrate && pnpm db:rls`.
+- **P1**: Replay-test Stripe + Clerk webhooks against the dev instance.
+- **P1**: Inngest dry-run via `inngest-cli dev`.
+- **P2**: Build flash-cards product layer (separate concern; reuses everything above).
+- **P3**: Transfer-ownership action, leave-workspace action, audit-log export (Enterprise gate).
+- **P3**: Playwright E2E for the Phase-0 checklist.
 
 ## Notes
-- Boilerplate lives in `/app/saas-boilerplate/` (separate folder so the Emergent supervisor's default React+FastAPI scaffolding is undisturbed). Treat that folder as the root of a fresh repo when cloning to a real GitHub/Vercel project.
+- Boilerplate lives in `/app/saas-boilerplate/`. Treat it as the root of a fresh repo when cloning to GitHub/Vercel.
+- Will not run in the Emergent preview environment (Next.js+Postgres+Clerk vs. the supervisor's React+FastAPI).

@@ -5,6 +5,7 @@ import { resolveTenantForUser, type TenantContext } from "@/lib/db/with-tenant";
 import { db } from "@/lib/db";
 import { subscriptions, tenants } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { features } from "@/lib/config/features";
 import Link from "next/link";
 
 export interface TenantLayoutProps {
@@ -53,7 +54,7 @@ export default async function TenantLayout({ children }: TenantLayoutProps) {
           <nav className="flex gap-4 text-sm">
             <Link href="/dashboard">Dashboard</Link>
             <Link href="/team">Team</Link>
-            <Link href="/billing">Billing</Link>
+            {features.billingEnabled && <Link href="/billing">Billing</Link>}
             <Link href="/settings">Settings</Link>
           </nav>
         </div>

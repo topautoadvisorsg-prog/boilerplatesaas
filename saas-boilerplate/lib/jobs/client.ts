@@ -1,14 +1,11 @@
 import { Inngest } from "inngest";
+import { appConfig } from "@/lib/config/app";
 
 export const inngest = new Inngest({
-  id: "saas-boilerplate",
-  name: "SaaS Boilerplate",
+  id: appConfig.inngestAppId,
+  name: appConfig.name,
 });
 
-/**
- * Centralized event-name registry — any new job event must be added here so
- * the type system catches typos.
- */
 export type AppEvents = {
   "user/welcome.email": { data: { userId: string } };
   "tenant/provision": { data: { tenantId: string } };

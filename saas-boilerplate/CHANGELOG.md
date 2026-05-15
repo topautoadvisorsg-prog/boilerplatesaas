@@ -3,6 +3,42 @@
 All notable changes to the SaaS boilerplate are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-01-XX — White-label hardening
+
+### Added — Configuration layer (`lib/config/`)
+- `lib/config/app.ts` — single source of truth for app identity (name, description, marketing copy, Inngest app id, support email). All values overridable via `NEXT_PUBLIC_APP_*` env vars.
+- `lib/config/billing.ts` — plan catalog moved here from `lib/billing/plans.ts` (which is now a back-compat re-export). Override per deployment to customize plan names, prices, limits.
+- `lib/config/features.ts` — runtime feature flags: `adminEnabled`, `billingEnabled`, `invitesEnabled`, `emailEnabled`. Driven by `FEATURE_*` env vars.
+
+### Added — Services layer (`lib/services/`)
+Business logic moved out of server actions and webhook routes into:
+- `tenantService` — `createTenant` (atomic Clerk+DB with rollback), `upsertTenantFromClerk`
+- `userService` — `upsertUserFromClerk`, `deleteUserByClerkId`, `addMembershipByClerk`, `removeMembershipByClerk` (correctly scoped by `(tenantId, userId)`)
+- `inviteService` — `createInvite`, `removeMember`, `acceptInvite`
+- `billingService` — `startCheckout`, `openBillingPortal`, internal `ensureCustomer`
+- `subscriptionService` — `applySubscriptionUpsert`, `markSubscriptionCanceled`, `markPastDueByStripeId`
+
+Server actions are now thin interface adapters that parse input and delegate. Webhook routes verify signatures, gate idempotency, and delegate. **Zero business logic in `app/` outside of UI.**
+
+### Changed — Identity removed from runtime
+- `app/layout.tsx` metadata reads from `appConfig.name` / `.description`
+- `app/page.tsx` marketing copy reads from `appConfig.marketing.*`
+- `lib/jobs/client.ts` Inngest app id reads from `appConfig.inngestAppId`
+- `app/admin/layout.tsx` header label generic ("Admin")
+- No file under `app/` or `lib/` references "SaaS Boilerplate" or any product-specific term (grep verified)
+
+### Changed — Feature flags applied
+- `/admin/*` returns 404 when `FEATURE_ADMIN_ENABLED=0`
+- Billing nav link hidden when `FEATURE_BILLING_ENABLED=0`; `startCheckout` / `openBillingPortal` reject
+- Invite UI hidden + `createInvite` rejects when `FEATURE_INVITES_ENABLED=0`
+- `lib/email/client.ts` sends via Resend when `FEATURE_EMAIL_ENABLED=1`, otherwise logs to console (Resend SDK lazy-imported only when enabled)
+
+### Verified — Tenant isolation invariants
+- Every `app/(tenant)/**` page either calls `resolveTenantForUser()` first or runs inside `withTenant()`
+- Every mutation in services that touches tenant-scoped tables wraps in `withTenant()` (rate-limit table is global by design)
+- Webhook routes operate at system trust level (no `withTenant`), document writes scoped explicitly by `tenant_id`
+- Admin queries are explicitly global (overview aggregates, full tenant/user lists) and audit-logged on per-tenant access
+
 ## [1.2.1] — 2026-01-XX
 
 ### Fixed

@@ -102,32 +102,53 @@ Next.js App
 ```
 app/
   (auth)/sign-in, sign-up        ← Clerk hosted pages
-  onboarding/                    ← create workspace (atomic Clerk + DB)
-  (tenant)/                      ← tenant-scoped pages (dashboard, team, billing, settings)
-  admin/                         ← internal admin (gated by ADMIN_USER_IDS)
-  accept-invite/[token]/         ← join-by-invite flow
+  onboarding/                    ← create workspace (thin action → tenantService)
+  (tenant)/                      ← tenant-scoped UI (dashboard, team, billing, settings)
+  admin/                         ← internal admin (gated by ADMIN_USER_IDS + feature flag)
+  accept-invite/[token]/         ← join-by-invite (thin action → inviteService)
   api/
-    webhooks/clerk, stripe       ← signature-verified webhooks
+    webhooks/clerk, stripe       ← signature-verified, delegate to services
     inngest/                     ← Inngest function endpoint
+
 lib/
-  env.ts                         ← Zod-validated env, fails fast at boot
-  db/                            ← schema, drizzle client, withTenant()
+  config/                        ← WHITE-LABEL CORE — override per deployment
+    app.ts                       ← name, description, branding, Inngest app id
+    billing.ts                   ← plan catalog (Free / Pro / Enterprise)
+    features.ts                  ← runtime flags (adminEnabled, billingEnabled, ...)
+
+  services/                      ← BUSINESS LOGIC LAYER — all mutations live here
+    tenantService.ts             ← createTenant, upsertTenantFromClerk
+    userService.ts               ← upsert/delete users, membership lifecycle
+    inviteService.ts             ← invites + accept + remove member
+    billingService.ts            ← Stripe checkout + portal
+    subscriptionService.ts       ← Stripe webhook handlers
+
+  db/                            ← schema, drizzle client, withTenant() helper
   auth/                          ← current user, admin gating
-  billing/                       ← plans + Stripe client
-  email/                         ← stub sender + templates
+  billing/plans.ts               ← back-compat re-export of config/billing
+  billing/stripe.ts              ← lazy Stripe client
+  email/                         ← transport (Resend or stub) + templates
   jobs/                          ← Inngest functions
   audit/                         ← action enum + writer
   tenant.ts                      ← slug validation + reserved words
   rate-limit.ts                  ← invite rate limiter (Postgres-backed)
+  env.ts                         ← Zod-validated env, fails fast at boot
+
 drizzle/
   migrations/                    ← generated SQL
-  rls.sql                        ← RLS policies (applied via scripts/apply-rls.ts)
-scripts/
-  apply-rls.ts                   ← runs drizzle/rls.sql
+  rls.sql                        ← Row-Level Security policies
+
+scripts/apply-rls.ts             ← runs drizzle/rls.sql
 middleware.ts                    ← Clerk + subdomain routing
 instrumentation.ts               ← Sentry init + env validation at boot
 sentry.{client,server,edge}.config.ts
 ```
+
+### Layer rules
+1. **`app/`** is pure interface — pages, server actions (thin wrappers), webhook routes (signature-verify + delegate).
+2. **`lib/services/`** holds all business logic. Anything that mutates DB state or talks to an external API lives here.
+3. **`lib/config/`** is the only place product identity exists. Forking a new product = editing these three files + setting env vars.
+4. **`lib/db/`** never gets touched by `app/` code. Services own the data layer.
 
 ---
 
@@ -163,29 +184,17 @@ Use [ngrok](https://ngrok.com) or [Cloudflare Tunnel](https://developers.cloudfl
 
 ## Going live: switching email from stub to Resend
 
-Open `lib/email/client.ts` and replace the `sendEmail` body:
+Set `FEATURE_EMAIL_ENABLED=1` in `.env.local`. That's it — `lib/email/client.ts` already calls Resend behind that flag. Make sure `RESEND_API_KEY` and `EMAIL_FROM` are valid before flipping.
 
-```ts
-import { Resend } from "resend";
-import { getEnv } from "@/lib/env";
+## Branding / white-labelling
 
-const resend = new Resend(getEnv().RESEND_API_KEY);
+All identity lives in **`lib/config/app.ts`** + the `NEXT_PUBLIC_APP_*` env vars in `.env.example`. To start a new product:
 
-export async function sendEmail(input: SendEmailInput) {
-  const { data, error } = await resend.emails.send({
-    from: getEnv().EMAIL_FROM,
-    to: input.to,
-    subject: input.subject,
-    html: input.html,
-    text: input.text,
-    tags: input.tag ? [{ name: "category", value: input.tag }] : undefined,
-  });
-  if (error) throw error;
-  return { id: data?.id ?? "unknown" };
-}
-```
+1. Set `NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_APP_DESCRIPTION`, `NEXT_PUBLIC_APP_HEADLINE`, `NEXT_PUBLIC_APP_SUBHEAD`, `NEXT_PUBLIC_APP_SLUG`, `NEXT_PUBLIC_SUPPORT_EMAIL` in `.env.local`.
+2. (Optional) Tweak `lib/config/billing.ts` plan catalog and `lib/config/features.ts` defaults.
+3. Build your product UI as new routes under `app/(tenant)/<your-feature>/`. Use services from `lib/services/*` and never write raw DB queries in your pages.
 
-No other code changes are required — every job's idempotency guard (`*_sent_at` columns) keeps emails non-duplicated.
+No code under `app/` references the boilerplate name.
 
 ---
 

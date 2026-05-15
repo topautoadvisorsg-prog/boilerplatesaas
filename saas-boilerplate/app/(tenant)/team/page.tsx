@@ -3,6 +3,7 @@ import { requireAppUser } from "@/lib/auth/current-user";
 import { resolveTenantForUser, withTenant } from "@/lib/db/with-tenant";
 import { tenantMembers, users, invitations } from "@/lib/db/schema";
 import { eq, isNull, and, gt } from "drizzle-orm";
+import { features } from "@/lib/config/features";
 import { inviteMemberAction, removeMemberAction } from "./actions";
 
 export default async function TeamPage() {
@@ -38,7 +39,7 @@ export default async function TeamPage() {
     return { members, pending };
   });
 
-  const canInvite = ctx.role !== "member";
+  const canInvite = ctx.role !== "member" && features.invitesEnabled;
 
   return (
     <div className="space-y-8">
