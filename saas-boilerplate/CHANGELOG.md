@@ -3,6 +3,35 @@
 All notable changes to the SaaS boilerplate are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-01-XX — Admin UI production polish
+
+### Added — UI primitive library (`components/ui/`)
+- `Button` (5 variants × 3 sizes), `Card` (header/title/description/content/footer), `Badge` (6 tones, optional dot), `Input`, `Table` (Th/Td/Tr/THead/TBody), `Avatar` (initials with stable color hash + image fallback), `EmptyState`, `Skeleton`, `PageHeader`, `Breadcrumb`
+- All accessible, keyboard-focusable, dark-mode-aware via semantic tokens
+
+### Added — Admin-specific components (`components/admin/`)
+- `AdminSidebar` — persistent left nav with active-route highlighting and "Back to app" link
+- `StatCard` — KPI tile with icon, hint, and optional trend indicator
+- `StatusBadge` / `PlanBadge` — Stripe subscription status + plan with tone mapping (trialing→info, past_due→warning, etc.)
+- `DataTable` — searchable, filterable client component with empty states, clickable rows, search-count summary
+
+### Added — Design system (`app/globals.css`)
+- Semantic color tokens (`background`, `foreground`, `card`, `muted`, `border`, `border-strong`, `primary`, `accent`, `success`, `warning`, `danger`, `info`) — all with paired `*-foreground` and soft variants
+- Subtle scrollbar styling, selection color, shimmer keyframe for skeletons
+
+### Added — Date/time formatting (`lib/format.ts`)
+- `formatRelativeTime` ("just now", "5m ago", "Jan 12"), `formatDate`, `formatDateTime`
+
+### Changed — Admin pages rewritten
+- `/admin` (Overview) — 4 KPI cards (Tenants, Users, Paid subs with trial/past-due breakdown, MRR estimate from Pro+Enterprise list price); Recent Tenants list + Recent Users list with avatars
+- `/admin/tenants` — Searchable DataTable with name/slug, plan badge, status badge, relative date; clickable rows
+- `/admin/tenants/[id]` — Breadcrumb + sectioned cards (Workspace identity, Subscription detail, Members with role badges, Recent Activity audit log feed); no JSON dumps
+- `/admin/users` — Searchable DataTable with avatar, ID, relative join date
+
+### Added — Loading & error states
+- `app/admin/loading.tsx`, `app/admin/tenants/loading.tsx`, `app/admin/users/loading.tsx` — Skeleton-based placeholders matching final layout
+- `app/admin/error.tsx` — Friendly error boundary with retry button
+
 ## [1.3.0] — 2026-01-XX — White-label hardening
 
 ### Added — Configuration layer (`lib/config/`)
