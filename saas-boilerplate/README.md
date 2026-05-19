@@ -1,8 +1,10 @@
-# SaaS Boilerplate — v1.3
+# SaaS Boilerplate — v1.5
 
 A reusable, white-label multi-tenant SaaS engine. Drop in product features on top of a fully-wired auth, billing, team, jobs, and observability stack.
 
 > **Stack**: Next.js 15 (App Router) · TypeScript strict · Clerk · Neon Postgres · Drizzle ORM · Stripe · Inngest · Resend (flag-gated) · Sentry · Tailwind v4 · Vercel
+>
+> **Billing model (v1.5)**: subscriptions are **user-scoped within a tenant** — tenant = scope/billing-container, user = entitlement-holder. Default plans: Free / Pro $4.99 / Premium $9.99 (rename in `lib/config/billing.ts` per product).
 
 ## System overview
 
@@ -35,7 +37,7 @@ app/                              ← INTERFACE LAYER (UI + thin actions + webho
 lib/
   config/                         ← WHITE-LABEL CORE — only place product identity lives
     app.ts                        name, description, marketing, Inngest app id
-    billing.ts                    plan catalog (Free / Pro / Enterprise)
+    billing.ts                    plan catalog (Free / Pro / Premium — user-scoped entitlements)
     features.ts                   runtime flags (admin/billing/invites/email)
 
   services/                       ← BUSINESS LOGIC LAYER — every mutation lives here
@@ -72,6 +74,20 @@ sentry.{client,server,edge}.config.ts
 3. **`lib/config/`** is the only place product identity exists. Forking a new product = editing these three files + setting env vars.
 4. **`lib/db/`** is never touched by `app/` code. Services own the data layer.
 
+### Database schema at a glance (`lib/db/schema.ts`)
+
+| Table | Purpose | Tenant-scoped? | Key fields |
+|---|---|---|---|
+| `users` | App user (synced from Clerk) | No (global) | `clerk_user_id`, `email`, `timezone`, `daily_goal_minutes`, `onboarding_complete`, `streak_count`, `last_study_date`, `email_unsubscribed`, `email_unsubscribed_types` |
+| `tenants` | Workspace / organization | No (global) | `clerk_org_id`, `slug`, `subdomain`, `custom_domain`, `status` enum, branding (`primary_color`, `secondary_color`, `font_family`, `logo_url`), `support_email` |
+| `tenant_settings` | Per-tenant runtime config (1:1 w/ tenants) | Yes (1 row per tenant) | `feature_flags`, `subscription_tiers`, `trial_days`, `grace_period_days`, `storage_quota_mb`, `session_card_cap`, `enabled_region_ids` |
+| `tenant_members` | User ↔ tenant link with role | Yes (RLS) | `tenant_id`, `user_id`, `role` (owner/admin/member) |
+| `subscriptions` | **User-scoped** Stripe state inside a tenant | Yes (RLS) | unique `(tenant_id, user_id)`, `plan` (free/pro/premium), `status`, `stripe_customer_id`, `stripe_subscription_id`, `trial_ends_at`, `grace_period_end`, `previously_unlocked_deck_ids` |
+| `invitations` | Pending team invites | Yes (RLS) | `tenant_id`, `email`, `role`, `token`, `expires_at`, `accepted_at` |
+| `audit_logs` | Append-only audit trail | Yes (RLS, nullable tenant_id for system events) | `tenant_id`, `user_id`, `action` (from `AUDIT_ACTIONS`), `metadata` jsonb |
+| `processed_stripe_events` | Stripe webhook idempotency gate | No (global) | `stripe_event_id` PK |
+| `invite_rate_limit` | Postgres-backed rate limiter | No (per-tenant bucket) | `tenant_id` PK, `window_start`, `count` |
+
 ---
 
 ## Modules
@@ -93,33 +109,36 @@ Each subsystem documented as: **what it does · where it lives · how to modify 
   - Change admin gate → edit `ADMIN_USER_IDS` env var (comma-separated Clerk user IDs)
 
 ### 2. Tenancy
-- **What**: Organizations live at `{slug}.yourapp.com`. Subdomain → tenant resolution at the edge, re-validated server-side, enforced by Postgres RLS.
+- **What**: Organizations live at `{slug}.yourapp.com`. Subdomain → tenant resolution at the edge, re-validated server-side, enforced by Postgres RLS. Each tenant has a `tenant_settings` row holding per-tenant runtime config (feature flags, branding, region whitelist, session caps, grace period).
 - **Where**:
   - `middleware.ts` — extracts subdomain (trusting only Vercel-normalized `Host`), sets `x-tenant-slug` header
   - `lib/db/with-tenant.ts` — `resolveTenantForUser()` re-validates membership against DB; `withTenant()` opens a transaction with `app.current_tenant_id` set
   - `drizzle/rls.sql` — RLS policies on `tenant_members`, `subscriptions`, `invitations`, `audit_logs`
   - `lib/tenant.ts` — slug format + reserved words
-  - `lib/services/tenantService.ts` — `createTenant`, `upsertTenantFromClerk`
+  - `lib/services/tenantService.ts` — `createTenant` (atomic Clerk + DB w/ rollback, seeds `tenant_settings` + owner's free subscription in one txn), `upsertTenantFromClerk`
+  - `tenants` table fields: `name`, `slug`, `subdomain`, `custom_domain`, `status` enum, `primary_color`, `secondary_color`, `font_family`, `support_email`, `logo_url`
 - **How to modify**:
   - Add reserved slugs → append to `RESERVED_SLUGS` in `lib/tenant.ts`
   - Change slug rules → edit `SLUG_REGEX` in `lib/tenant.ts`
   - Add tenant-scoped table → add `tenant_id uuid NOT NULL` column + write an RLS policy in `drizzle/rls.sql` + re-run `pnpm db:rls`
+  - Add a per-tenant config field → extend the `tenant_settings` table schema; defaults seeded automatically by `tenantService.createTenant`
   - Switch to path-based tenancy (e.g., `/t/{slug}/...`) → rewrite `middleware.ts` to parse path instead of `Host`; everything downstream is slug-based and unchanged
 
 ### 3. Billing (Stripe)
-- **What**: Subscription billing with trial / upgrade / downgrade / cancel / payment-failed. Plan is **always read from DB** (never cached in session), lapsed subscriptions drop to read-only.
+- **What**: Per-user subscription billing with trial / upgrade / downgrade / cancel / payment-failed. **Entitlement lives on the user, not the tenant** — each user has their own Stripe Customer and Subscription row, scoped by `(tenant_id, user_id)`. Plan is **always read from DB** (never cached in session); lapsed subscriptions drop to read-only.
 - **Where**:
-  - `lib/config/billing.ts` — plan catalog (Free / Pro $49 / Enterprise $199, trial days, feature matrix)
-  - `lib/services/billingService.ts` — `startCheckout`, `openBillingPortal`, `ensureCustomer`
-  - `lib/services/subscriptionService.ts` — `applySubscriptionUpsert`, `markSubscriptionCanceled`, `markPastDueByStripeId`
-  - `app/api/webhooks/stripe/route.ts` — verified webhook with atomic idempotency via `processed_stripe_events`
+  - `lib/config/billing.ts` — plan catalog (Free / Pro $4.99 / Premium $9.99, trial days, feature matrix: `maxDecks`, `dailyCardLimit`, `maxActiveRegions`, `hasAudioCards`, `hasAdvancedProgress`, `hasAiCardGeneration`)
+  - `lib/services/billingService.ts` — `startCheckout` (per-user Stripe Customer), `openBillingPortal`, internal `ensureCustomer`
+  - `lib/services/subscriptionService.ts` — `applySubscriptionUpsert`, `markSubscriptionCanceled`, `markPastDueByStripeId`, `getUserSubscription`, `ensureFreeSubscription`
+  - `app/api/webhooks/stripe/route.ts` — verified webhook, atomic idempotency via `processed_stripe_events`; subscription metadata MUST contain `tenant_id` AND `user_id`
   - `app/(tenant)/billing/page.tsx` + `actions.ts` — UI + thin server actions
 - **How to modify**:
-  - Add a new plan → add entry to `billingConfig` in `lib/config/billing.ts`, add `STRIPE_<NEW>_PRICE_ID` env var, create the price in Stripe Dashboard
+  - Add a new plan → add entry to `billingConfig` in `lib/config/billing.ts`, add `STRIPE_<NAME>_PRICE_ID` env var, create the price in Stripe Dashboard
   - Change feature matrix → edit the `limits` object on each plan; `canUseFeature()` and `isWithinLimit()` use it
   - Change trial length → edit `trial_period_days` in `billingService.startCheckout` *and* `trialDays` in `lib/config/billing.ts` (keep them in sync)
   - Disable billing entirely → `FEATURE_BILLING_ENABLED=0` (tab hides, actions reject)
   - Add a new webhook event → handle in `app/api/webhooks/stripe/route.ts` (delegate to a service method; never inline logic)
+  - **Switch to tenant-scoped billing (B2B team model)** → change the unique index on `subscriptions` from `(tenant_id, user_id)` to `(tenant_id)`, drop `user_id` references in services & webhook. The schema/service split makes either model possible.
 
 ### 4. Jobs (Inngest)
 - **What**: Async tasks with retries (3x), concurrency limits, dead-letter behavior, and cron triggers. **Idempotency is enforced by callers**, not Inngest — every job checks a `*_sent_at` column or the `processed_*_events` table before doing work.
@@ -214,7 +233,7 @@ Every variable in `.env.example` is **required at boot**. The app will refuse to
 | `CLERK_WEBHOOK_SECRET` | Clerk | Webhooks → Add Endpoint → `https://<your-domain>/api/webhooks/clerk` → subscribe to `user.*`, `organization.*`, `organizationMembership.*`. |
 | `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY` | [Stripe](https://dashboard.stripe.com) | Developers → API keys (use test keys to start). |
 | `STRIPE_WEBHOOK_SECRET` | Stripe | Developers → Webhooks → Add endpoint → `https://<your-domain>/api/webhooks/stripe` → events: `customer.subscription.*`, `invoice.payment_failed`. For local dev: `stripe listen --forward-to localhost:3000/api/webhooks/stripe`. |
-| `STRIPE_PRO_PRICE_ID`, `STRIPE_ENTERPRISE_PRICE_ID` | Stripe | Products → create two recurring prices ($49, $199). Copy the `price_...` IDs. |
+| `STRIPE_PRO_PRICE_ID`, `STRIPE_PREMIUM_PRICE_ID` | Stripe | Products → create two recurring prices (defaults: $4.99 Pro / $9.99 Premium — edit in `lib/config/billing.ts`). Copy the `price_...` IDs. |
 | `RESEND_API_KEY`, `EMAIL_FROM` | [Resend](https://resend.com) | Create API key. Verify a sending domain — `EMAIL_FROM` must use that domain. *Email is stubbed by default; only required at boot.* |
 | `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY` | [Inngest](https://app.inngest.com) | Project → Manage → Event keys / Signing key. |
 | `NEXT_PUBLIC_APP_URL` | — | `https://yourapp.com` (or `http://localhost:3000` locally). |
@@ -266,7 +285,7 @@ Run these in this exact order the first time:
 1. **Provision external services** (parallel)
    - Neon project → grab `DATABASE_URL` + `DATABASE_URL_UNPOOLED`
    - Clerk app → grab keys; **enable Organizations** in Clerk Dashboard → Organizations settings
-   - Stripe (test mode) → grab keys; create Pro + Enterprise products with monthly recurring prices
+   - Stripe (test mode) → grab keys; create Pro + Premium products with monthly recurring prices
    - Inngest project → grab event key + signing key
    - Sentry project → grab DSN
 2. **Fill `.env.local`** from `.env.example`. Boot will refuse if anything is missing.
@@ -319,10 +338,13 @@ Use [ngrok](https://ngrok.com) or [Cloudflare Tunnel](https://developers.cloudfl
 | Wrong user after login | `lib/auth/current-user.ts` (`requireAppUser`) |
 | Tenant routing broken | `middleware.ts` (subdomain extraction), `lib/db/with-tenant.ts` (`resolveTenantForUser`) |
 | Cross-tenant data leak | `drizzle/rls.sql`, any service in `lib/services/` not using `withTenant()` |
-| Onboarding fails | `lib/services/tenantService.ts` (`createTenant`), `app/onboarding/actions.ts` |
+| Onboarding fails | `lib/services/tenantService.ts` (`createTenant` — seeds tenant_settings + owner sub), `app/onboarding/actions.ts` |
+| Per-tenant setting not applied | `tenant_settings` row + `lib/services/tenantService.ts` seeding logic |
 | Invite/accept broken | `lib/services/inviteService.ts`, `app/(tenant)/team/actions.ts`, `app/accept-invite/[token]/actions.ts` |
-| Stripe checkout/portal broken | `lib/services/billingService.ts`, `app/(tenant)/billing/actions.ts`, `lib/billing/stripe.ts` |
-| Stripe webhook bug | `app/api/webhooks/stripe/route.ts` (gate), `lib/services/subscriptionService.ts` (logic) |
+| Stripe checkout/portal broken | `lib/services/billingService.ts` (per-user customer), `app/(tenant)/billing/actions.ts`, `lib/billing/stripe.ts` |
+| Stripe webhook bug | `app/api/webhooks/stripe/route.ts` (gate + metadata `tenant_id`+`user_id`), `lib/services/subscriptionService.ts` (logic) |
+| Wrong plan / lapsed user not gated | `lib/config/billing.ts` (`canUseFeature`), `lib/services/subscriptionService.ts` (`getUserSubscription`) |
+| User has multiple subs in one tenant | Expected — billing is user-scoped. Composite unique is `(tenant_id, user_id)`. |
 | Clerk webhook bug | `app/api/webhooks/clerk/route.ts` (gate), `lib/services/userService.ts` + `tenantService.ts` (logic) |
 | Background job not running | `lib/jobs/functions.ts`, `lib/jobs/client.ts`, `app/api/inngest/route.ts` |
 | Email not sending / wrong content | `lib/email/client.ts` (transport), `lib/email/templates.ts` (copy) |
@@ -330,6 +352,7 @@ Use [ngrok](https://ngrok.com) or [Cloudflare Tunnel](https://developers.cloudfl
 | Feature flag not toggling | `lib/config/features.ts` |
 | Branding string showing wrong | `lib/config/app.ts` + `NEXT_PUBLIC_APP_*` env vars |
 | Admin UI bug | `app/admin/*`, `components/admin/*`, `components/ui/*` |
+| Admin tenants list missing plan column | Removed in v1.5 — billing is user-scoped, so a tenant has many subs. See per-user list on `/admin/tenants/[id]`. |
 | Audit log missing entries | `lib/audit/log.ts`, `lib/audit/actions.ts` (enum) |
 | DB schema mismatch | `lib/db/schema.ts` → re-run `pnpm db:generate && pnpm db:migrate` |
 | RLS blocking valid query | `drizzle/rls.sql`, confirm caller wraps in `withTenant()` |
@@ -484,7 +507,7 @@ import { canUseFeature } from "@/lib/config/billing";
 
 const [sub] = await db.select({ plan: subscriptions.plan, status: subscriptions.status })
   .from(subscriptions).where(eq(subscriptions.tenantId, ctx.tenantId)).limit(1);
-if (!canUseFeature(sub.plan, sub.status, "hasAdvancedAnalytics")) {
+if (!canUseFeature(sub.plan, sub.status, "hasAdvancedProgress")) {
   throw new Error("Upgrade required");
 }
 ```
@@ -531,14 +554,16 @@ After cloning, before building product features, verify:
 - [ ] `pnpm typecheck` → zero errors
 - [ ] `pnpm lint` → zero errors
 - [ ] `pnpm db:migrate && pnpm db:rls` → succeeds against a fresh Neon DB
-- [ ] Sign up via Clerk → `users` row exists in DB
-- [ ] Onboarding flow → `tenants`, `tenant_members` (role=owner), `subscriptions` (plan=free) rows
+- [ ] Sign up via Clerk → `users` row exists in DB with default `timezone='UTC'`, `daily_goal_minutes=10`, `onboarding_complete=false`
+- [ ] Onboarding flow → `tenants` (status='active'), `tenant_members` (role=owner), `tenant_settings`, and `subscriptions` (plan=free, scoped to owner's user_id) rows all created
 - [ ] Visit `<slug>.localhost:3000/dashboard` → loads
 - [ ] Visit another slug you don't belong to → redirect to `/onboarding`
 - [ ] Invite a teammate → row in `invitations`, console logs invite email, 7-day expiry set
 - [ ] Accept invite as that user → `tenant_members` row added, `accepted_at` set
-- [ ] Start Pro trial → Stripe Checkout → webhook updates `subscriptions` row
+- [ ] Start Pro trial as Owner → Stripe Checkout → webhook upserts `subscriptions` row scoped by `(tenant_id, user_id)`
+- [ ] Have a *second* user start their own trial in the same workspace → second `subscriptions` row created (owner's row unaffected) — confirms user-scoped billing
 - [ ] Admin user can reach `/admin`, non-admin gets redirected
+- [ ] `/admin/tenants/[id]` shows per-user subscription list (not a single subscription card)
 - [ ] Replay the same Stripe webhook id → returns `{ duplicate: true }` (idempotency)
 
 ---

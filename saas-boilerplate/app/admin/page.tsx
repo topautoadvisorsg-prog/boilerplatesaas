@@ -93,7 +93,7 @@ export default async function AdminOverviewPage() {
           label="MRR (est.)"
           value={`$${mrr.toLocaleString()}`}
           icon={DollarSign}
-          hint="Pro + Enterprise list price"
+          hint="Pro + Premium list price"
         />
       </div>
 

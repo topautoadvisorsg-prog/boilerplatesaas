@@ -50,7 +50,7 @@ export function StatusBadge({ status }: { status: string | null | undefined }) {
 const planTone: Record<string, Tone> = {
   free: "neutral",
   pro: "primary",
-  enterprise: "info",
+  premium: "info",
 };
 
 export function PlanBadge({ plan }: { plan: string | null | undefined }) {
