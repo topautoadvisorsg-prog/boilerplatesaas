@@ -12,6 +12,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:rls": "tsx scripts/apply-rls.ts",
+    "db:seed-regions": "tsx scripts/seed-regions.ts",
     "inngest:dev": "inngest-cli dev"
   },
   "dependencies": {

@@ -1,10 +1,12 @@
-# SaaS Boilerplate — v1.5
+# SaaS Boilerplate — v1.6
 
 A reusable, white-label multi-tenant SaaS engine. Drop in product features on top of a fully-wired auth, billing, team, jobs, and observability stack.
 
 > **Stack**: Next.js 15 (App Router) · TypeScript strict · Clerk · Neon Postgres · Drizzle ORM · Stripe · Inngest · Resend (flag-gated) · Sentry · Tailwind v4 · Vercel
 >
 > **Billing model (v1.5)**: subscriptions are **user-scoped within a tenant** — tenant = scope/billing-container, user = entitlement-holder. Default plans: Free / Pro $4.99 / Premium $9.99 (rename in `lib/config/billing.ts` per product).
+>
+> **Regions (v1.6)**: optional global region catalog (`regions` table) + per-user selection (`user_regions`, RLS-scoped). Region capacity gated by `PlanLimits.maxActiveRegions`. Seeded by `pnpm db:seed-regions`.
 
 ## System overview
 
@@ -87,6 +89,8 @@ sentry.{client,server,edge}.config.ts
 | `audit_logs` | Append-only audit trail | Yes (RLS, nullable tenant_id for system events) | `tenant_id`, `user_id`, `action` (from `AUDIT_ACTIONS`), `metadata` jsonb |
 | `processed_stripe_events` | Stripe webhook idempotency gate | No (global) | `stripe_event_id` PK |
 | `invite_rate_limit` | Postgres-backed rate limiter | No (per-tenant bucket) | `tenant_id` PK, `window_start`, `count` |
+| `regions` | Global catalog of regions/territories | **No (global)** — readable by all tenants | `slug`, `name`, `description`, `parent_region_id`, `bounding_box` jsonb, `accent_color`, `display_order`, `is_active`. Seeded via `pnpm db:seed-regions`. |
+| `user_regions` | User's selected regions | Yes (RLS) | `tenant_id`, `user_id`, `region_id`, `is_primary`. Partial unique index enforces "1 primary per user". Plan limit (`maxActiveRegions`) enforced in service layer. |
 
 ---
 
@@ -189,6 +193,21 @@ Each subsystem documented as: **what it does · where it lives · how to modify 
 - **Where**: `sentry.{client,server,edge}.config.ts`, `instrumentation.ts`, `next.config.ts` (`withSentryConfig`)
 - **How to modify**: Edit DSN / sample rates per environment in the three config files. Source-map upload requires `SENTRY_AUTH_TOKEN` + `SENTRY_ORG` + `SENTRY_PROJECT` at build time.
 
+### 8. Regions *(optional product layer — v1.6)*
+- **What**: Two-table region system. `regions` is a global catalog (no tenancy). `user_regions` is RLS-scoped per tenant and tracks each user's selection with exactly-one-primary enforced by a partial unique index. Region capacity is plan-gated via `PlanLimits.maxActiveRegions` — Free is capped at 1, paid tiers unlimited.
+- **Where**:
+  - `lib/db/schema.ts` — `regions`, `user_regions` tables + relations
+  - `lib/services/regionService.ts` — `listAvailableRegions`, `getUserRegions`, `setUserRegions`, `setPrimaryRegion`, `removeUserRegion`, `getPrimaryRegion`, `RegionLimitError`
+  - `drizzle/rls.sql` — `ur_tenant_isolation` policy on `user_regions`
+  - `scripts/seed-regions.ts` — idempotent NA wilderness seed (10 regions)
+  - `lib/audit/actions.ts` — `REGION_SELECTED`, `REGION_PRIMARY_CHANGED`, `REGION_REMOVED`
+- **How to modify**:
+  - Add/rename a region → edit the `SEED` array in `scripts/seed-regions.ts`, then `pnpm db:seed-regions` (idempotent — runs as upsert by slug)
+  - Restrict a tenant's visible regions → set `tenant_settings.enabled_region_ids` to a non-empty array of region UUIDs. Empty array = all regions.
+  - Change region capacity per plan → edit `maxActiveRegions` in `lib/config/billing.ts`
+  - Switch the catalog to a totally different concept (e.g., industries, languages) → keep the schema, replace seed data + service variable names; the `tenant_settings.enabled_region_ids` filter logic still applies
+  - Drop the region system entirely → delete the two tables, the service, the seed, and the RLS policy. Nothing else depends on it.
+
 ---
 
 ## Quick start
@@ -289,7 +308,7 @@ Run these in this exact order the first time:
    - Inngest project → grab event key + signing key
    - Sentry project → grab DSN
 2. **Fill `.env.local`** from `.env.example`. Boot will refuse if anything is missing.
-3. **Database**: `pnpm db:generate && pnpm db:migrate && pnpm db:rls`
+3. **Database**: `pnpm db:generate && pnpm db:migrate && pnpm db:rls && pnpm db:seed-regions`
 4. **Local subdomains**: add hosts entries (`acme.localhost`, `admin.localhost`)
 5. **Start app**: `pnpm dev`
 6. **Webhook tunnels** (separate terminals — wait until step 5 is up):
@@ -310,6 +329,7 @@ pnpm db:generate          # produce a new migration from schema changes
 pnpm db:migrate           # apply pending migrations
 pnpm db:push              # ⚠️ dev only — skip migration files, push schema directly
 pnpm db:rls               # apply Row-Level Security policies
+pnpm db:seed-regions      # seed/refresh the global regions catalog (idempotent)
 
 pnpm inngest:dev          # local Inngest dev server (UI at http://localhost:8288)
 ```
@@ -553,7 +573,7 @@ After cloning, before building product features, verify:
 
 - [ ] `pnpm typecheck` → zero errors
 - [ ] `pnpm lint` → zero errors
-- [ ] `pnpm db:migrate && pnpm db:rls` → succeeds against a fresh Neon DB
+- [ ] `pnpm db:migrate && pnpm db:rls && pnpm db:seed-regions` → succeeds against a fresh Neon DB; `regions` table contains 10 active rows
 - [ ] Sign up via Clerk → `users` row exists in DB with default `timezone='UTC'`, `daily_goal_minutes=10`, `onboarding_complete=false`
 - [ ] Onboarding flow → `tenants` (status='active'), `tenant_members` (role=owner), `tenant_settings`, and `subscriptions` (plan=free, scoped to owner's user_id) rows all created
 - [ ] Visit `<slug>.localhost:3000/dashboard` → loads

@@ -3,6 +3,35 @@
 All notable changes to the SaaS boilerplate are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — 2026-01-XX — Phase 2: Region system
+
+### Added — Schema
+- `regions` table (GLOBAL catalog — no RLS, all tenants read from it): `slug`, `name`, `description`, `parent_region_id` (self-FK for hierarchy), `bounding_box` jsonb, `accent_color`, `display_order`, `is_active`. Active+order index, slug unique.
+- `user_regions` table (RLS-scoped per tenant): `tenant_id`, `user_id`, `region_id`, `is_primary`. Composite unique on `(tenant_id, user_id, region_id)`. **Partial unique index on `(tenant_id, user_id) WHERE is_primary = true`** — DB enforces "exactly one primary region per user".
+
+### Added — RLS
+- `user_regions` enabled with policy `ur_tenant_isolation` (USING + WITH CHECK on `tenant_id = app_current_tenant_id()`). `regions` intentionally NOT under RLS — it's a global catalog; tenants restrict the visible subset via application logic.
+
+### Added — Service layer (`lib/services/regionService.ts`)
+- `listAvailableRegions(tenantId)` — global catalog filtered by `tenant_settings.enabled_region_ids` (empty array = all)
+- `getUserRegions(ctx)` — user's selected regions, joined with the catalog
+- `setUserRegions(ctx, { regionIds, primaryRegionId? })` — atomic replace; validates against tenant's enabled set, enforces `PlanLimits.maxActiveRegions` (Free = 1), promotes one primary
+- `setPrimaryRegion(ctx, regionId)` — swap primary among already-selected regions
+- `removeUserRegion(ctx, regionId)` — drop one; refuses if it would leave the user with zero; auto-promotes a new primary if needed
+- `getPrimaryRegion(ctx)` — convenience read used by product code
+- `RegionLimitError` exported for UI gating
+
+### Added — Audit actions
+- `REGION_SELECTED`, `REGION_REMOVED`, `REGION_PRIMARY_CHANGED` in `AUDIT_ACTIONS`
+
+### Added — Seed script
+- `scripts/seed-regions.ts` — idempotent (`ON CONFLICT (slug) DO UPDATE`) — seeds 10 NA wilderness regions: Pacific Northwest, Rocky Mountains, Sierra Nevada, Desert Southwest, Great Basin, Appalachians, Great Lakes & Northwoods, Canadian Boreal, Atlantic & Gulf Coastal Plains, Subtropical Florida. Each carries a bounding box + accent color for the SVG map.
+- Run via `pnpm db:seed-regions`. Added to `package.json` scripts.
+
+### Notes
+- Plan-tier filter: free users are capped at 1 active region. Pro & Premium are unlimited. Lapsed (`past_due`/`unpaid`/`incomplete_expired`) users are treated as free for region capacity purposes.
+- Regions intentionally have no tenant_id — a single source of truth makes recall propagation (Phase 3) and cross-tenant analytics straightforward.
+
 ## [1.5.0] — 2026-01-XX — Phase 1: Wilderness engine adjustments
 
 ### Changed — Billing model: tenant-scoped → user-scoped (entitlement)

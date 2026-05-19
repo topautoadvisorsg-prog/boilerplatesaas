@@ -14,7 +14,7 @@
 
 ## Build progress
 - ✅ **Phase 0** — Engine (auth, RLS, tenancy, jobs, billing infra, admin UI, white-label config)
-- ✅ **Phase 1** — Engine adjustments (this delivery)
+- ✅ **Phase 1** — Engine adjustments
   - Subscription model refactor → user-scoped
   - `users`, `tenants` schema extensions
   - `tenant_settings` new table
@@ -23,13 +23,19 @@
   - Stripe Customer per-user
   - Webhook handlers updated for `user_id` metadata
   - Admin UI updated for per-user subscriptions
+- ✅ **Phase 2** — Region system (this delivery)
+  - `regions` global catalog + `user_regions` RLS-scoped (partial unique index for "1 primary per user")
+  - `regionService` (list / get / set / set-primary / remove / get-primary) with plan-tier limit enforcement
+  - Audit actions: `REGION_SELECTED`, `REGION_PRIMARY_CHANGED`, `REGION_REMOVED`
+  - `scripts/seed-regions.ts` idempotent seed of 10 NA wilderness regions + `pnpm db:seed-regions` script
+  - `tenant_settings.enabled_region_ids` filter wired in
 
-## Quality gates after Phase 1
+## Quality gates after Phase 2
 - `tsc --noEmit`: **0 errors**
 - `eslint`: **0 errors, 0 warnings**
+- Branding grep: clean
 
 ## Phase plan (remaining)
-- **Phase 2** — Region system (Region + UserRegion + seed + APIs + free-tier filter) — 2-3d
 - **Phase 3** — Content schema + global→tenant clone pipeline + recall propagation — 2-3d
 - **Phase 4** — Study engine (FSRS, UserCardState, StudySession, daily limit, streak service) — 3-4d
 - **Phase 5** — Recommendation engine — 1d

@@ -43,6 +43,21 @@ CREATE POLICY inv_tenant_isolation ON invitations
   WITH CHECK (tenant_id = app_current_tenant_id());
 
 -- ---------------------------------------------------------------------
+-- user_regions
+-- ---------------------------------------------------------------------
+ALTER TABLE user_regions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_regions FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS ur_tenant_isolation ON user_regions;
+CREATE POLICY ur_tenant_isolation ON user_regions
+  USING (tenant_id = app_current_tenant_id())
+  WITH CHECK (tenant_id = app_current_tenant_id());
+
+-- Note: `regions` is intentionally NOT enabled for RLS — it is a global
+-- catalog readable by all tenants. Tenants opt into specific regions via
+-- tenant_settings.enabled_region_ids (application-level filter).
+
+-- ---------------------------------------------------------------------
 -- audit_logs (tenant_id is NULLABLE for global events; allow NULL rows
 -- to bypass the policy so admin/system writes still work).
 -- ---------------------------------------------------------------------

@@ -193,6 +193,66 @@ export const subscriptions = pgTable(
 );
 
 /* ------------------------------------------------------------------ */
+/* regions — GLOBAL catalog. Tenants opt into a subset via              */
+/* tenant_settings.enabled_region_ids. Users pick from the allowed set. */
+/* ------------------------------------------------------------------ */
+export const regions = pgTable(
+  "regions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    parentRegionId: uuid("parent_region_id"),
+    /** Geographic bounding box for the SVG map. Shape: { north,south,east,west } in decimal degrees. */
+    boundingBox: jsonb("bounding_box"),
+    /** Hex color used to tint the region on the map. */
+    accentColor: text("accent_color"),
+    displayOrder: integer("display_order").notNull().default(0),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("regions_slug_idx").on(t.slug),
+    index("regions_parent_idx").on(t.parentRegionId),
+    index("regions_active_order_idx").on(t.isActive, t.displayOrder),
+  ],
+);
+
+/* ------------------------------------------------------------------ */
+/* user_regions — which regions a user has selected (RLS-scoped).      */
+/* Exactly one row per user may have is_primary = true (enforced via   */
+/* partial unique index).                                              */
+/* ------------------------------------------------------------------ */
+export const userRegions = pgTable(
+  "user_regions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    regionId: uuid("region_id")
+      .notNull()
+      .references(() => regions.id, { onDelete: "restrict" }),
+    isPrimary: boolean("is_primary").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_regions_unique_idx").on(t.tenantId, t.userId, t.regionId),
+    index("user_regions_user_idx").on(t.tenantId, t.userId),
+    index("user_regions_region_idx").on(t.regionId),
+    // Enforce "one primary region per user per tenant" at the DB level.
+    uniqueIndex("user_regions_one_primary_idx")
+      .on(t.tenantId, t.userId)
+      .where(sql`is_primary = true`),
+  ],
+);
+
+/* ------------------------------------------------------------------ */
 /* invitations                                                         */
 /* ------------------------------------------------------------------ */
 export const invitations = pgTable(
@@ -286,4 +346,20 @@ export const tenantMembersRelations = relations(tenantMembers, ({ one }) => ({
 export const subscriptionsRelations = relations(subscriptions, ({ one }) => ({
   tenant: one(tenants, { fields: [subscriptions.tenantId], references: [tenants.id] }),
   user: one(users, { fields: [subscriptions.userId], references: [users.id] }),
+}));
+
+export const regionsRelations = relations(regions, ({ one, many }) => ({
+  parent: one(regions, {
+    fields: [regions.parentRegionId],
+    references: [regions.id],
+    relationName: "region_parent",
+  }),
+  children: many(regions, { relationName: "region_parent" }),
+  userRegions: many(userRegions),
+}));
+
+export const userRegionsRelations = relations(userRegions, ({ one }) => ({
+  tenant: one(tenants, { fields: [userRegions.tenantId], references: [tenants.id] }),
+  user: one(users, { fields: [userRegions.userId], references: [users.id] }),
+  region: one(regions, { fields: [userRegions.regionId], references: [regions.id] }),
 }));

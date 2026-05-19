@@ -20,6 +20,11 @@ export const AUDIT_ACTIONS = {
   SUBSCRIPTION_CANCELED: "subscription.canceled",
   PAYMENT_FAILED: "payment.failed",
 
+  // Regions
+  REGION_SELECTED: "region.selected",
+  REGION_REMOVED: "region.removed",
+  REGION_PRIMARY_CHANGED: "region.primary_changed",
+
   // Admin
   ADMIN_TENANT_ACCESSED: "admin.tenant_accessed",
   ADMIN_USER_ACCESSED: "admin.user_accessed",
