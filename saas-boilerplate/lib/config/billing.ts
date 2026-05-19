@@ -3,17 +3,26 @@
  * plan names, pricing, limits, and feature gates.
  *
  * Stripe price IDs come from env vars (so dev/staging/prod can share this file).
+ *
+ * Phase 1.5 (Wilderness): tiers are now free / pro / premium and represent USER
+ * entitlement, not tenant entitlement. Each user can have their own subscription.
  */
 
-export type PlanId = "free" | "pro" | "enterprise";
+export type PlanId = "free" | "pro" | "premium";
 
 export interface PlanLimits {
-  maxTeamMembers: number;
-  maxProjects: number;
+  /** Decks visible to the user. Infinity = unlimited. */
+  maxDecks: number;
+  /** Daily card ratings allowed. Infinity = unlimited. */
+  dailyCardLimit: number;
+  /** How many regions a user can have active simultaneously. Infinity = unlimited. */
+  maxActiveRegions: number;
+  /** Free trial length in days. */
   trialDays: number;
-  hasAdvancedAnalytics: boolean;
+  hasAudioCards: boolean;
+  hasAdvancedProgress: boolean;
   hasPrioritySupport: boolean;
-  hasAuditLogExport: boolean;
+  hasAiCardGeneration: boolean;
 }
 
 export interface PlanDefinition {
@@ -32,40 +41,46 @@ export const billingConfig: Record<PlanId, PlanDefinition> = {
     monthlyPriceUsd: 0,
     stripePriceIdEnv: null,
     limits: {
-      maxTeamMembers: 3,
-      maxProjects: 1,
+      maxDecks: 3,
+      dailyCardLimit: 20,
+      maxActiveRegions: 1,
       trialDays: 0,
-      hasAdvancedAnalytics: false,
+      hasAudioCards: false,
+      hasAdvancedProgress: false,
       hasPrioritySupport: false,
-      hasAuditLogExport: false,
+      hasAiCardGeneration: false,
     },
   },
   pro: {
     id: "pro",
     name: "Pro",
-    monthlyPriceUsd: 49,
+    monthlyPriceUsd: 4.99,
     stripePriceIdEnv: "STRIPE_PRO_PRICE_ID",
     limits: {
-      maxTeamMembers: 10,
-      maxProjects: 25,
+      maxDecks: Number.POSITIVE_INFINITY,
+      dailyCardLimit: Number.POSITIVE_INFINITY,
+      maxActiveRegions: Number.POSITIVE_INFINITY,
       trialDays: 14,
-      hasAdvancedAnalytics: true,
+      hasAudioCards: false,
+      hasAdvancedProgress: true,
       hasPrioritySupport: false,
-      hasAuditLogExport: false,
+      hasAiCardGeneration: false,
     },
   },
-  enterprise: {
-    id: "enterprise",
-    name: "Enterprise",
-    monthlyPriceUsd: 199,
-    stripePriceIdEnv: "STRIPE_ENTERPRISE_PRICE_ID",
+  premium: {
+    id: "premium",
+    name: "Premium",
+    monthlyPriceUsd: 9.99,
+    stripePriceIdEnv: "STRIPE_PREMIUM_PRICE_ID",
     limits: {
-      maxTeamMembers: Number.POSITIVE_INFINITY,
-      maxProjects: Number.POSITIVE_INFINITY,
+      maxDecks: Number.POSITIVE_INFINITY,
+      dailyCardLimit: Number.POSITIVE_INFINITY,
+      maxActiveRegions: Number.POSITIVE_INFINITY,
       trialDays: 14,
-      hasAdvancedAnalytics: true,
+      hasAudioCards: true,
+      hasAdvancedProgress: true,
       hasPrioritySupport: true,
-      hasAuditLogExport: true,
+      hasAiCardGeneration: true,
     },
   },
 };

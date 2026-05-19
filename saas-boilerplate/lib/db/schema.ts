@@ -20,7 +20,7 @@ import { relations, sql } from "drizzle-orm";
 /* Enums                                                               */
 /* ------------------------------------------------------------------ */
 export const roleEnum = pgEnum("role", ["owner", "admin", "member"]);
-export const planEnum = pgEnum("plan", ["free", "pro", "enterprise"]);
+export const planEnum = pgEnum("plan", ["free", "pro", "premium"]);
 export const subscriptionStatusEnum = pgEnum("subscription_status", [
   "trialing",
   "active",
@@ -30,6 +30,14 @@ export const subscriptionStatusEnum = pgEnum("subscription_status", [
   "incomplete_expired",
   "unpaid",
   "paused",
+]);
+export const tenantStatusEnum = pgEnum("tenant_status", [
+  "provisioning",
+  "active",
+  "inactive",
+  "suspended",
+  "failed",
+  "deleted",
 ]);
 
 /* ------------------------------------------------------------------ */
@@ -43,7 +51,20 @@ export const users = pgTable(
     email: text("email").notNull(),
     name: text("name"),
     avatarUrl: text("avatar_url"),
+    // Profile / product
+    timezone: text("timezone").notNull().default("UTC"),
+    dailyGoalMinutes: integer("daily_goal_minutes").notNull().default(10),
+    onboardingComplete: boolean("onboarding_complete").notNull().default(false),
+    onboardingStep: integer("onboarding_step").notNull().default(0),
+    // Streak (cached; reconciled nightly)
+    streakCount: integer("streak_count").notNull().default(0),
+    lastStudyDate: timestamp("last_study_date", { mode: "date" }),
+    // Email preferences
+    emailUnsubscribed: boolean("email_unsubscribed").notNull().default(false),
+    emailUnsubscribedTypes: jsonb("email_unsubscribed_types").notNull().default(sql`'[]'::jsonb`),
+    // System
     welcomeEmailSentAt: timestamp("welcome_email_sent_at", { withTimezone: true }),
+    isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -63,14 +84,48 @@ export const tenants = pgTable(
     clerkOrgId: text("clerk_org_id").notNull(),
     name: text("name").notNull(),
     slug: text("slug").notNull(),
+    subdomain: text("subdomain"),
+    customDomain: text("custom_domain"),
+    status: tenantStatusEnum("status").notNull().default("active"),
     logoUrl: text("logo_url"),
+    primaryColor: text("primary_color"),
+    secondaryColor: text("secondary_color"),
+    fontFamily: text("font_family"),
+    supportEmail: text("support_email"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("tenants_slug_idx").on(t.slug),
     uniqueIndex("tenants_clerk_org_id_idx").on(t.clerkOrgId),
+    uniqueIndex("tenants_subdomain_idx").on(t.subdomain),
+    uniqueIndex("tenants_custom_domain_idx").on(t.customDomain),
   ],
+);
+
+/* ------------------------------------------------------------------ */
+/* tenant_settings — per-tenant runtime configuration                  */
+/* ------------------------------------------------------------------ */
+export const tenantSettings = pgTable(
+  "tenant_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    featureFlags: jsonb("feature_flags").notNull().default(sql`'{}'::jsonb`),
+    /** Per-tier Stripe Price IDs override env-level defaults. Shape: { pro: "price_...", premium: "price_..." } */
+    subscriptionTiers: jsonb("subscription_tiers").notNull().default(sql`'{}'::jsonb`),
+    trialDays: integer("trial_days").notNull().default(14),
+    gracePeriodDays: integer("grace_period_days").notNull().default(3),
+    storageQuotaMb: integer("storage_quota_mb").notNull().default(1024),
+    sessionCardCap: integer("session_card_cap").notNull().default(20),
+    /** Array of region UUIDs enabled for this tenant. Empty array = all regions. */
+    enabledRegionIds: jsonb("enabled_region_ids").notNull().default(sql`'[]'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("tenant_settings_tenant_idx").on(t.tenantId)],
 );
 
 /* ------------------------------------------------------------------ */
@@ -97,7 +152,10 @@ export const tenantMembers = pgTable(
 );
 
 /* ------------------------------------------------------------------ */
-/* subscriptions                                                       */
+/* subscriptions — Phase 1.5 model:                                    */
+/*   • tenant = scope/billing-container                                */
+/*   • user   = entitlement holder                                     */
+/* Each user has at most one subscription row per tenant.              */
 /* ------------------------------------------------------------------ */
 export const subscriptions = pgTable(
   "subscriptions",
@@ -106,6 +164,9 @@ export const subscriptions = pgTable(
     tenantId: uuid("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
     stripeCustomerId: text("stripe_customer_id"),
     stripeSubscriptionId: text("stripe_subscription_id"),
     stripePriceId: text("stripe_price_id"),
@@ -116,13 +177,18 @@ export const subscriptions = pgTable(
     currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
     cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
     canceledAt: timestamp("canceled_at", { withTimezone: true }),
+    gracePeriodEnd: timestamp("grace_period_end", { withTimezone: true }),
+    /** Decks the user has unlocked previously; preserved across cancel for re-subscribe UX. */
+    previouslyUnlockedDeckIds: jsonb("previously_unlocked_deck_ids").notNull().default(sql`'[]'::jsonb`),
     trialReminderSentAt: timestamp("trial_reminder_sent_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("subscriptions_tenant_id_idx").on(t.tenantId),
+    uniqueIndex("subscriptions_tenant_user_idx").on(t.tenantId, t.userId),
+    index("subscriptions_user_idx").on(t.userId),
     index("subscriptions_stripe_subscription_id_idx").on(t.stripeSubscriptionId),
+    index("subscriptions_stripe_customer_id_idx").on(t.stripeCustomerId),
   ],
 );
 
@@ -200,17 +266,24 @@ export const inviteRateLimit = pgTable(
 export const tenantsRelations = relations(tenants, ({ many, one }) => ({
   members: many(tenantMembers),
   invitations: many(invitations),
-  subscription: one(subscriptions, {
+  subscriptions: many(subscriptions),
+  settings: one(tenantSettings, {
     fields: [tenants.id],
-    references: [subscriptions.tenantId],
+    references: [tenantSettings.tenantId],
   }),
 }));
 
 export const usersRelations = relations(users, ({ many }) => ({
   memberships: many(tenantMembers),
+  subscriptions: many(subscriptions),
 }));
 
 export const tenantMembersRelations = relations(tenantMembers, ({ one }) => ({
   tenant: one(tenants, { fields: [tenantMembers.tenantId], references: [tenants.id] }),
   user: one(users, { fields: [tenantMembers.userId], references: [users.id] }),
+}));
+
+export const subscriptionsRelations = relations(subscriptions, ({ one }) => ({
+  tenant: one(tenants, { fields: [subscriptions.tenantId], references: [tenants.id] }),
+  user: one(users, { fields: [subscriptions.userId], references: [users.id] }),
 }));

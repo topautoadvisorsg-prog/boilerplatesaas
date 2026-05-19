@@ -1,46 +1,75 @@
 /**
  * billingService — Stripe customer / checkout / portal lifecycle.
+ *
+ * Phase 1.5 model: subscriptions are USER-scoped within a tenant.
+ *   - Stripe Customer is per-user (each user enters their own card)
+ *   - Subscription rows are keyed by (tenant_id, user_id)
+ *   - Checkout/portal sessions are always called by a specific user
  */
 import { db } from "@/lib/db";
-import { subscriptions } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { subscriptions, users } from "@/lib/db/schema";
+import { eq, and } from "drizzle-orm";
 import { stripe } from "@/lib/billing/stripe";
 import { getEnv } from "@/lib/env";
 import { features } from "@/lib/config/features";
 import type { TenantContext } from "@/lib/db/with-tenant";
 
-async function ensureCustomer(tenantId: string, tenantName: string, email: string): Promise<string> {
+async function ensureCustomer(args: {
+  tenantId: string;
+  userId: string;
+  email: string;
+  name: string | null;
+}): Promise<string> {
   const [row] = await db
     .select({ stripeCustomerId: subscriptions.stripeCustomerId })
     .from(subscriptions)
-    .where(eq(subscriptions.tenantId, tenantId))
+    .where(and(eq(subscriptions.tenantId, args.tenantId), eq(subscriptions.userId, args.userId)))
     .limit(1);
   if (row?.stripeCustomerId) return row.stripeCustomerId;
 
   const customer = await stripe().customers.create({
-    email,
-    name: tenantName,
-    metadata: { tenant_id: tenantId },
+    email: args.email,
+    name: args.name ?? args.email,
+    metadata: { tenant_id: args.tenantId, user_id: args.userId },
   });
   await db
-    .update(subscriptions)
-    .set({ stripeCustomerId: customer.id })
-    .where(eq(subscriptions.tenantId, tenantId));
+    .insert(subscriptions)
+    .values({
+      tenantId: args.tenantId,
+      userId: args.userId,
+      stripeCustomerId: customer.id,
+      plan: "free",
+      status: "active",
+    })
+    .onConflictDoUpdate({
+      target: [subscriptions.tenantId, subscriptions.userId],
+      set: { stripeCustomerId: customer.id, updatedAt: new Date() },
+    });
   return customer.id;
 }
 
 export async function startCheckout(args: {
   ctx: TenantContext;
-  plan: "pro" | "enterprise";
-  callerEmail: string;
-  tenantName: string;
+  plan: "pro" | "premium";
 }): Promise<{ url: string }> {
   if (!features.billingEnabled) throw new Error("Billing is disabled for this deployment.");
-  if (args.ctx.role !== "owner" && args.ctx.role !== "admin") throw new Error("Forbidden");
 
   const env = getEnv();
-  const priceId = args.plan === "pro" ? env.STRIPE_PRO_PRICE_ID : env.STRIPE_ENTERPRISE_PRICE_ID;
-  const customerId = await ensureCustomer(args.ctx.tenantId, args.tenantName, args.callerEmail);
+  const priceId = args.plan === "pro" ? env.STRIPE_PRO_PRICE_ID : env.STRIPE_PREMIUM_PRICE_ID;
+
+  const [u] = await db
+    .select({ email: users.email, name: users.name })
+    .from(users)
+    .where(eq(users.id, args.ctx.userId))
+    .limit(1);
+  if (!u) throw new Error("User not found");
+
+  const customerId = await ensureCustomer({
+    tenantId: args.ctx.tenantId,
+    userId: args.ctx.userId,
+    email: u.email,
+    name: u.name,
+  });
 
   const session = await stripe().checkout.sessions.create({
     mode: "subscription",
@@ -48,11 +77,11 @@ export async function startCheckout(args: {
     line_items: [{ price: priceId, quantity: 1 }],
     subscription_data: {
       trial_period_days: 14,
-      metadata: { tenant_id: args.ctx.tenantId },
+      metadata: { tenant_id: args.ctx.tenantId, user_id: args.ctx.userId },
     },
     success_url: `${env.NEXT_PUBLIC_APP_URL}/billing?success=1`,
     cancel_url: `${env.NEXT_PUBLIC_APP_URL}/billing?canceled=1`,
-    metadata: { tenant_id: args.ctx.tenantId },
+    metadata: { tenant_id: args.ctx.tenantId, user_id: args.ctx.userId },
   });
   if (!session.url) throw new Error("Stripe session has no URL");
   return { url: session.url };
@@ -60,11 +89,10 @@ export async function startCheckout(args: {
 
 export async function openBillingPortal(ctx: TenantContext): Promise<{ url: string }> {
   if (!features.billingEnabled) throw new Error("Billing is disabled for this deployment.");
-  if (ctx.role !== "owner" && ctx.role !== "admin") throw new Error("Forbidden");
   const [row] = await db
     .select({ stripeCustomerId: subscriptions.stripeCustomerId })
     .from(subscriptions)
-    .where(eq(subscriptions.tenantId, ctx.tenantId))
+    .where(and(eq(subscriptions.tenantId, ctx.tenantId), eq(subscriptions.userId, ctx.userId)))
     .limit(1);
   if (!row?.stripeCustomerId) {
     throw new Error("No Stripe customer yet — start a subscription first.");

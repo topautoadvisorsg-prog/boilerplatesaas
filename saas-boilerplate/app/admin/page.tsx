@@ -1,12 +1,11 @@
 import Link from "next/link";
 import { Building2, Users, CreditCard, DollarSign, ArrowRight } from "lucide-react";
 import { db } from "@/lib/db";
-import { tenants, users, subscriptions } from "@/lib/db/schema";
-import { desc, eq, sql } from "drizzle-orm";
+import { tenants, users } from "@/lib/db/schema";
+import { desc, sql } from "drizzle-orm";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { StatCard } from "@/components/admin/stat-card";
-import { StatusBadge, PlanBadge } from "@/components/admin/status-badges";
 import { Avatar } from "@/components/ui/avatar";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatRelativeTime } from "@/lib/format";
@@ -20,7 +19,7 @@ interface CountsRow {
   trialing_subs: number;
   past_due_subs: number;
   pro_count: number;
-  enterprise_count: number;
+  premium_count: number;
 }
 
 export default async function AdminOverviewPage() {
@@ -33,7 +32,7 @@ export default async function AdminOverviewPage() {
         (SELECT COUNT(*) FROM subscriptions WHERE status = 'trialing')::int AS trialing_subs,
         (SELECT COUNT(*) FROM subscriptions WHERE status = 'past_due')::int AS past_due_subs,
         (SELECT COUNT(*) FROM subscriptions WHERE plan = 'pro' AND status IN ('active','trialing'))::int AS pro_count,
-        (SELECT COUNT(*) FROM subscriptions WHERE plan = 'enterprise' AND status IN ('active','trialing'))::int AS enterprise_count
+        (SELECT COUNT(*) FROM subscriptions WHERE plan = 'premium' AND status IN ('active','trialing'))::int AS premium_count
     `)
     .then((r) => r.rows);
 
@@ -44,12 +43,12 @@ export default async function AdminOverviewPage() {
     trialing_subs: 0,
     past_due_subs: 0,
     pro_count: 0,
-    enterprise_count: 0,
+    premium_count: 0,
   };
 
   const mrr =
     c.pro_count * billingConfig.pro.monthlyPriceUsd +
-    c.enterprise_count * billingConfig.enterprise.monthlyPriceUsd;
+    c.premium_count * billingConfig.premium.monthlyPriceUsd;
 
   const recentTenants = await db
     .select({
@@ -57,11 +56,8 @@ export default async function AdminOverviewPage() {
       name: tenants.name,
       slug: tenants.slug,
       createdAt: tenants.createdAt,
-      plan: subscriptions.plan,
-      status: subscriptions.status,
     })
     .from(tenants)
-    .leftJoin(subscriptions, eq(subscriptions.tenantId, tenants.id))
     .orderBy(desc(tenants.createdAt))
     .limit(5);
 
@@ -135,8 +131,6 @@ export default async function AdminOverviewPage() {
                         <div className="text-xs text-muted-foreground truncate">/{t.slug}</div>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        <PlanBadge plan={t.plan} />
-                        <StatusBadge status={t.status} />
                         <span className="text-xs text-muted-foreground tabular-nums w-16 text-right">
                           {formatRelativeTime(t.createdAt)}
                         </span>

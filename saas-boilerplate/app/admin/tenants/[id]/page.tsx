@@ -41,10 +41,19 @@ export default async function AdminTenantDetailPage({
   const [tenant] = await db.select().from(tenants).where(eq(tenants.id, id)).limit(1);
   if (!tenant) notFound();
 
-  const [sub] = await db.select().from(subscriptions).where(eq(subscriptions.tenantId, id)).limit(1);
+  // All user-scoped subscriptions for this tenant.
+  const subs = await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.tenantId, id))
+    .orderBy(desc(subscriptions.createdAt));
+  const paidCount = subs.filter((s) => s.plan !== "free" && (s.status === "active" || s.status === "trialing")).length;
+  const trialCount = subs.filter((s) => s.status === "trialing").length;
+  const pastDueCount = subs.filter((s) => s.status === "past_due").length;
   const members = await db
     .select({
       id: tenantMembers.id,
+      userId: tenantMembers.userId,
       role: tenantMembers.role,
       joinedAt: tenantMembers.joinedAt,
       email: users.email,
@@ -85,9 +94,12 @@ export default async function AdminTenantDetailPage({
           />
         }
         actions={
-          <div className="flex items-center gap-2">
-            <PlanBadge plan={sub?.plan} />
-            <StatusBadge status={sub?.status} />
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>{subs.length} subs</span>
+            <span>·</span>
+            <span>{paidCount} paid</span>
+            {trialCount > 0 && <><span>·</span><span>{trialCount} trial</span></>}
+            {pastDueCount > 0 && <><span>·</span><span className="text-warning">{pastDueCount} past due</span></>}
           </div>
         }
       />
@@ -112,43 +124,56 @@ export default async function AdminTenantDetailPage({
           </CardContent>
         </Card>
 
-        {/* Subscription */}
+        {/* Subscriptions */}
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
               <CreditCard className="h-4 w-4 text-muted-foreground" />
-              <CardTitle>Subscription</CardTitle>
+              <CardTitle>Subscriptions</CardTitle>
             </div>
-            <CardDescription>Current Stripe state.</CardDescription>
+            <CardDescription>Per-user billing state.</CardDescription>
           </CardHeader>
           <CardContent>
-            {!sub ? (
+            {subs.length === 0 ? (
               <EmptyState
-                title="No subscription"
-                description="Will be auto-created on the next event."
+                title="No subscriptions"
+                description="Subscription rows are created on the user's first checkout or login."
               />
             ) : (
-              <>
-                <DetailRow label="Plan"><PlanBadge plan={sub.plan} /></DetailRow>
-                <DetailRow label="Status"><StatusBadge status={sub.status} /></DetailRow>
-                <DetailRow label="Trial ends">
-                  {sub.trialEndsAt ? formatDateTime(sub.trialEndsAt) : "—"}
-                </DetailRow>
-                <DetailRow label="Period">
-                  {sub.currentPeriodStart && sub.currentPeriodEnd
-                    ? `${formatDateTime(sub.currentPeriodStart)} → ${formatDateTime(sub.currentPeriodEnd)}`
-                    : "—"}
-                </DetailRow>
-                <DetailRow label="Cancel at end">
-                  {sub.cancelAtPeriodEnd ? <Badge tone="warning">Yes</Badge> : <span className="text-muted-foreground">No</span>}
-                </DetailRow>
-                <DetailRow label="Stripe customer">
-                  {sub.stripeCustomerId ? <code className="text-xs">{sub.stripeCustomerId}</code> : "—"}
-                </DetailRow>
-                <DetailRow label="Stripe subscription">
-                  {sub.stripeSubscriptionId ? <code className="text-xs">{sub.stripeSubscriptionId}</code> : "—"}
-                </DetailRow>
-              </>
+              <ul className="divide-y divide-border">
+                {subs.slice(0, 8).map((s) => {
+                  const userMember = members.find((m) => m.userId === s.userId);
+                  return (
+                    <li key={s.id} className="flex items-center justify-between gap-3 py-2.5">
+                      <div className="min-w-0 flex items-center gap-2">
+                        <Avatar
+                          name={userMember?.name ?? null}
+                          email={userMember?.email ?? null}
+                          src={userMember?.avatarUrl ?? null}
+                          size="sm"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-sm truncate">{userMember?.email ?? s.userId.slice(0, 8)}</div>
+                          {s.trialEndsAt && (
+                            <div className="text-xs text-muted-foreground">
+                              Trial: {formatDateTime(s.trialEndsAt)}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <PlanBadge plan={s.plan} />
+                        <StatusBadge status={s.status} />
+                      </div>
+                    </li>
+                  );
+                })}
+                {subs.length > 8 && (
+                  <li className="text-xs text-muted-foreground pt-3">
+                    + {subs.length - 8} more
+                  </li>
+                )}
+              </ul>
             )}
           </CardContent>
         </Card>

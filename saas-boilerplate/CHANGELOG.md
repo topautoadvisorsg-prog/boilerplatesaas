@@ -3,6 +3,32 @@
 All notable changes to the SaaS boilerplate are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — 2026-01-XX — Phase 1: Wilderness engine adjustments
+
+### Changed — Billing model: tenant-scoped → user-scoped (entitlement)
+- `subscriptions` table refactored from `(tenant_id)` unique → `(tenant_id, user_id)` unique. Each user can have their own subscription within a tenant.
+- Stripe Customer now created **per-user** (not per-tenant).
+- Stripe webhook metadata now requires both `tenant_id` AND `user_id`; events missing either are dropped (or recovered via `stripe_subscription_id` lookup for cancel events).
+- `subscriptionService` API: `applySubscriptionUpsert`, `markSubscriptionCanceled`, `markPastDueByStripeId` all take `userId`. New helpers: `getUserSubscription`, `ensureFreeSubscription`.
+- `billingService.startCheckout` now resolves `userId` from `TenantContext`; `ensureCustomer` is per-user.
+- `tenantService.createTenant` seeds the owner's free subscription row at provisioning time.
+- Admin tenant detail page now shows **per-user subscription list** instead of a single subscription card.
+- Admin tenants list dropped plan/status columns (ambiguous at tenant level); shows member count instead.
+
+### Changed — Plan catalog renamed
+- `enterprise` → `premium`. Pricing: Pro $4.99/mo, Premium $9.99/mo. Limits redesigned for B2C product (`maxDecks`, `dailyCardLimit`, `maxActiveRegions`, `hasAudioCards`, `hasAdvancedProgress`, `hasAiCardGeneration`).
+- Env var `STRIPE_ENTERPRISE_PRICE_ID` renamed → `STRIPE_PREMIUM_PRICE_ID`.
+
+### Added — Schema extensions
+- `users` table: `timezone`, `daily_goal_minutes`, `onboarding_complete`, `onboarding_step`, `streak_count`, `last_study_date`, `email_unsubscribed`, `email_unsubscribed_types`, `is_active`.
+- `tenants` table: `subdomain`, `custom_domain` (unique), `status` enum (`provisioning`/`active`/`inactive`/`suspended`/`failed`/`deleted`), `primary_color`, `secondary_color`, `font_family`, `support_email`.
+- `tenant_settings` table: `feature_flags`, `subscription_tiers`, `trial_days`, `grace_period_days`, `storage_quota_mb`, `session_card_cap`, `enabled_region_ids`. Seeded by `tenantService.createTenant`.
+- `subscriptions` table: `grace_period_end`, `previously_unlocked_deck_ids` (for re-subscribe UX after cancel).
+
+### Notes
+- No data migration auto-generated yet. Run `pnpm db:generate && pnpm db:migrate && pnpm db:rls` against a fresh DB. For an existing DB, the rename of `enterprise → premium` requires a manual `ALTER TYPE plan ADD VALUE 'premium'; UPDATE subscriptions SET plan='premium' WHERE plan='enterprise'; ALTER TYPE plan DROP VALUE 'enterprise'` (Postgres enum manipulation).
+- `provisionTenant` Inngest job converted to no-op stub; future async provisioning (content cloning, analytics bootstrap) hangs off this event.
+
 ## [1.4.0] — 2026-01-XX — Admin UI production polish
 
 ### Added — UI primitive library (`components/ui/`)

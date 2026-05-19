@@ -51,13 +51,11 @@ export const provisionTenant = inngest.createFunction(
   { event: "tenant/provision" },
   async ({ event, step }) => {
     const { tenantId } = event.data;
-    return step.run("ensure-free-subscription", async () => {
-      await db
-        .insert(subscriptions)
-        .values({ tenantId, plan: "free", status: "active" })
-        .onConflictDoNothing({ target: subscriptions.tenantId });
-      return { ok: true };
-    });
+    // Phase 1.5: subscriptions are now user-scoped (seeded inside the
+    // tenantService.createTenant transaction). This job is reserved for any
+    // additional async provisioning side effects (content cloning, analytics
+    // bootstrap, etc.) — kept as a no-op success-stub for now.
+    return step.run("noop", async () => ({ tenantId, ok: true }));
   },
 );
 

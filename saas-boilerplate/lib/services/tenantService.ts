@@ -5,7 +5,7 @@
  * than touching the DB directly. This keeps tenant rules in one place.
  */
 import { db } from "@/lib/db";
-import { tenants, tenantMembers, subscriptions } from "@/lib/db/schema";
+import { tenants, tenantMembers, subscriptions, tenantSettings } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { validateSlugFormat } from "@/lib/tenant";
 import { clerkClient } from "@clerk/nextjs/server";
@@ -58,10 +58,16 @@ export async function createTenant(input: CreateTenantInput): Promise<CreatedTen
       await tx
         .insert(tenantMembers)
         .values({ tenantId: tRow.id, userId: input.ownerUserId, role: "owner" });
+      // Seed the owner's free subscription (user-scoped).
       await tx
         .insert(subscriptions)
-        .values({ tenantId: tRow.id, plan: "free", status: "active" })
-        .onConflictDoNothing({ target: subscriptions.tenantId });
+        .values({ tenantId: tRow.id, userId: input.ownerUserId, plan: "free", status: "active" })
+        .onConflictDoNothing({ target: [subscriptions.tenantId, subscriptions.userId] });
+      // Seed default tenant_settings row.
+      await tx
+        .insert(tenantSettings)
+        .values({ tenantId: tRow.id })
+        .onConflictDoNothing({ target: tenantSettings.tenantId });
       return tRow.id;
     });
     await logAudit({

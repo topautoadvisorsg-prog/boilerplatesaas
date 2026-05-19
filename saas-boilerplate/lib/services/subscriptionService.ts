@@ -1,11 +1,14 @@
 /**
- * subscriptionService — handles Stripe subscription state changes.
+ * subscriptionService — handles Stripe subscription state changes per-user.
  * Called from the Stripe webhook (post-idempotency-gate).
+ *
+ * Phase 1.5 model: subscriptions are scoped by (tenant_id, user_id).
+ * Stripe webhook metadata must contain both tenant_id and user_id.
  */
 import type Stripe from "stripe";
 import { db } from "@/lib/db";
 import { subscriptions } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { getEnv } from "@/lib/env";
 import { logAudit } from "@/lib/audit/log";
 import { AUDIT_ACTIONS } from "@/lib/audit/actions";
@@ -25,19 +28,21 @@ type SubscriptionStatus =
 function priceToPlan(priceId: string | null | undefined): PlanId {
   const env = getEnv();
   if (priceId === env.STRIPE_PRO_PRICE_ID) return "pro";
-  if (priceId === env.STRIPE_ENTERPRISE_PRICE_ID) return "enterprise";
+  if (priceId === env.STRIPE_PREMIUM_PRICE_ID) return "premium";
   return "free";
 }
 
 export async function applySubscriptionUpsert(args: {
   tenantId: string;
+  userId: string;
   sub: Stripe.Subscription;
   source: "created" | "updated";
 }): Promise<void> {
-  const { tenantId, sub } = args;
+  const { tenantId, userId, sub } = args;
   const priceId = sub.items.data[0]?.price.id ?? null;
   const values = {
     tenantId,
+    userId,
     stripeCustomerId: typeof sub.customer === "string" ? sub.customer : sub.customer.id,
     stripeSubscriptionId: sub.id,
     stripePriceId: priceId,
@@ -53,12 +58,12 @@ export async function applySubscriptionUpsert(args: {
     .insert(subscriptions)
     .values(values)
     .onConflictDoUpdate({
-      target: subscriptions.tenantId,
+      target: [subscriptions.tenantId, subscriptions.userId],
       set: { ...values, updatedAt: new Date() },
     });
   await logAudit({
     tenantId,
-    userId: null,
+    userId,
     action:
       args.source === "created"
         ? AUDIT_ACTIONS.SUBSCRIPTION_CREATED
@@ -67,14 +72,24 @@ export async function applySubscriptionUpsert(args: {
   });
 }
 
-export async function markSubscriptionCanceled(tenantId: string): Promise<void> {
+export async function markSubscriptionCanceled(args: {
+  tenantId: string;
+  userId: string;
+}): Promise<void> {
   await db
     .update(subscriptions)
-    .set({ plan: "free", status: "canceled", canceledAt: new Date(), updatedAt: new Date() })
-    .where(eq(subscriptions.tenantId, tenantId));
+    .set({
+      plan: "free",
+      status: "canceled",
+      canceledAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(eq(subscriptions.tenantId, args.tenantId), eq(subscriptions.userId, args.userId)),
+    );
   await logAudit({
-    tenantId,
-    userId: null,
+    tenantId: args.tenantId,
+    userId: args.userId,
     action: AUDIT_ACTIONS.SUBSCRIPTION_CANCELED,
     metadata: {},
   });
@@ -82,7 +97,11 @@ export async function markSubscriptionCanceled(tenantId: string): Promise<void> 
 
 export async function markPastDueByStripeId(stripeSubId: string, invoiceId: string | null): Promise<void> {
   const [row] = await db
-    .select({ id: subscriptions.id, tenantId: subscriptions.tenantId })
+    .select({
+      id: subscriptions.id,
+      tenantId: subscriptions.tenantId,
+      userId: subscriptions.userId,
+    })
     .from(subscriptions)
     .where(eq(subscriptions.stripeSubscriptionId, stripeSubId))
     .limit(1);
@@ -97,8 +116,35 @@ export async function markPastDueByStripeId(stripeSubId: string, invoiceId: stri
   });
   await logAudit({
     tenantId: row.tenantId,
-    userId: null,
+    userId: row.userId,
     action: AUDIT_ACTIONS.PAYMENT_FAILED,
     metadata: { invoiceId },
   });
+}
+
+/**
+ * Look up the active subscription row for a (tenant, user) pair.
+ * Returns `null` for users with no row yet (treat as free, lazy-create on first checkout).
+ */
+export async function getUserSubscription(
+  tenantId: string,
+  userId: string,
+): Promise<typeof subscriptions.$inferSelect | null> {
+  const [row] = await db
+    .select()
+    .from(subscriptions)
+    .where(and(eq(subscriptions.tenantId, tenantId), eq(subscriptions.userId, userId)))
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * Ensure a free-plan subscription row exists for this user in this tenant.
+ * Called at tenant onboarding / first login. Idempotent.
+ */
+export async function ensureFreeSubscription(tenantId: string, userId: string): Promise<void> {
+  await db
+    .insert(subscriptions)
+    .values({ tenantId, userId, plan: "free", status: "active" })
+    .onConflictDoNothing({ target: [subscriptions.tenantId, subscriptions.userId] });
 }

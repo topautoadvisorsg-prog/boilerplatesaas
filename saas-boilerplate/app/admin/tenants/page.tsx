@@ -1,18 +1,17 @@
 import { Building2 } from "lucide-react";
 import { db } from "@/lib/db";
-import { tenants, subscriptions } from "@/lib/db/schema";
-import { desc, eq } from "drizzle-orm";
+import { tenants, tenantMembers } from "@/lib/db/schema";
+import { desc, eq, sql } from "drizzle-orm";
 import { PageHeader } from "@/components/ui/page-header";
 import { DataTable, type Column } from "@/components/admin/data-table";
-import { StatusBadge, PlanBadge } from "@/components/admin/status-badges";
 import { formatRelativeTime } from "@/lib/format";
 
 interface Row {
   id: string;
   name: string;
   slug: string;
-  plan: string | null;
-  status: string | null;
+  status: string;
+  memberCount: number;
   createdAt: Date;
 }
 
@@ -29,16 +28,16 @@ const columns: Column<Row>[] = [
     searchValue: (r) => `${r.name} ${r.slug}`,
   },
   {
-    key: "plan",
-    header: "Plan",
-    cell: (r) => <PlanBadge plan={r.plan} />,
-    searchValue: (r) => r.plan ?? "",
-  },
-  {
     key: "status",
     header: "Status",
-    cell: (r) => <StatusBadge status={r.status} />,
-    searchValue: (r) => r.status ?? "",
+    cell: (r) => <span className="text-muted-foreground capitalize">{r.status}</span>,
+    searchValue: (r) => r.status,
+  },
+  {
+    key: "members",
+    header: "Members",
+    align: "right",
+    cell: (r) => <span className="tabular-nums">{r.memberCount}</span>,
   },
   {
     key: "created",
@@ -51,17 +50,20 @@ const columns: Column<Row>[] = [
 ];
 
 export default async function AdminTenantsPage() {
+  // Aggregate member count per tenant (subscriptions are per-user now, so we
+  // can't get a single "plan" per tenant — show membership size instead).
   const rows = await db
     .select({
       id: tenants.id,
       name: tenants.name,
       slug: tenants.slug,
-      plan: subscriptions.plan,
-      status: subscriptions.status,
+      status: tenants.status,
       createdAt: tenants.createdAt,
+      memberCount: sql<number>`COUNT(${tenantMembers.id})::int`,
     })
     .from(tenants)
-    .leftJoin(subscriptions, eq(subscriptions.tenantId, tenants.id))
+    .leftJoin(tenantMembers, eq(tenantMembers.tenantId, tenants.id))
+    .groupBy(tenants.id)
     .orderBy(desc(tenants.createdAt));
 
   return (
