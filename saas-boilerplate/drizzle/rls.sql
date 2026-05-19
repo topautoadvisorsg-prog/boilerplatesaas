@@ -57,6 +57,32 @@ CREATE POLICY ur_tenant_isolation ON user_regions
 -- catalog readable by all tenants. Tenants opt into specific regions via
 -- tenant_settings.enabled_region_ids (application-level filter).
 
+-- Note: `global_decks` and `global_cards` are also GLOBAL (no RLS). Every
+-- tenant reads from the same canonical catalog and only writes to their
+-- own `tenant_decks` / `tenant_cards` fork when customizing.
+
+-- ---------------------------------------------------------------------
+-- tenant_decks
+-- ---------------------------------------------------------------------
+ALTER TABLE tenant_decks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_decks FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS td_tenant_isolation ON tenant_decks;
+CREATE POLICY td_tenant_isolation ON tenant_decks
+  USING (tenant_id = app_current_tenant_id())
+  WITH CHECK (tenant_id = app_current_tenant_id());
+
+-- ---------------------------------------------------------------------
+-- tenant_cards
+-- ---------------------------------------------------------------------
+ALTER TABLE tenant_cards ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_cards FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tc_tenant_isolation ON tenant_cards;
+CREATE POLICY tc_tenant_isolation ON tenant_cards
+  USING (tenant_id = app_current_tenant_id())
+  WITH CHECK (tenant_id = app_current_tenant_id());
+
 -- ---------------------------------------------------------------------
 -- audit_logs (tenant_id is NULLABLE for global events; allow NULL rows
 -- to bypass the policy so admin/system writes still work).

@@ -1,7 +1,14 @@
 import { inngest } from "./client";
 import { db } from "@/lib/db";
-import { users, tenants, invitations, subscriptions } from "@/lib/db/schema";
-import { eq, and, isNull, lt, sql } from "drizzle-orm";
+import {
+  users,
+  tenants,
+  invitations,
+  subscriptions,
+  tenantCards,
+  tenantDecks,
+} from "@/lib/db/schema";
+import { eq, and, isNull, lt, sql, inArray } from "drizzle-orm";
 import { sendEmail } from "@/lib/email/client";
 import {
   welcomeEmail,
@@ -239,6 +246,58 @@ export const scheduleTrialEndingReminders = inngest.createFunction(
   },
 );
 
+// Silence unused import warning while keeping `lt` available for future scheduled queries.
+void lt;
+
+/* ------------------------------------------------------------------ */
+/* content/global.deck-changed — recall propagation for deck edits.    */
+/*                                                                     */
+/* Strategy: tenants that have NOT forked the deck inherit the update  */
+/* automatically at read time (the listDecks resolver UNIONs globals + */
+/* forks). Tenants WITH a fork have their own row; non-overridden      */
+/* fields still inherit at read time. So at the data layer there is no */
+/* per-tenant DB write needed for a global edit. This function exists  */
+/* to (a) bump the fork's `source_version` so admins can see how stale */
+/* their fork is, and (b) provide a fan-out hook for downstream cache  */
+/* invalidation (study recs, search indexes) when we add them.         */
+/* ------------------------------------------------------------------ */
+export const propagateGlobalDeckChange = inngest.createFunction(
+  { id: "propagate-global-deck-change", concurrency, retries },
+  { event: "content/global.deck-changed" },
+  async ({ event, step }) => {
+    const { globalDeckId, version } = event.data;
+    const updated = await step.run("bump-fork-versions", async () => {
+      const rows = await db
+        .update(tenantDecks)
+        .set({ sourceVersion: version })
+        .where(eq(tenantDecks.globalDeckId, globalDeckId))
+        .returning({ tenantId: tenantDecks.tenantId });
+      return rows.length;
+    });
+    return { globalDeckId, version, forksUpdated: updated };
+  },
+);
+
+/* ------------------------------------------------------------------ */
+/* content/global.card-changed — same idea for individual cards.       */
+/* ------------------------------------------------------------------ */
+export const propagateGlobalCardChange = inngest.createFunction(
+  { id: "propagate-global-card-change", concurrency, retries },
+  { event: "content/global.card-changed" },
+  async ({ event, step }) => {
+    const { globalCardId, version } = event.data;
+    const updated = await step.run("bump-fork-versions", async () => {
+      const rows = await db
+        .update(tenantCards)
+        .set({ sourceVersion: version })
+        .where(eq(tenantCards.globalCardId, globalCardId))
+        .returning({ id: tenantCards.id });
+      return rows.length;
+    });
+    return { globalCardId, version, forksUpdated: updated };
+  },
+);
+
 export const functions = [
   sendWelcomeEmail,
   provisionTenant,
@@ -247,7 +306,9 @@ export const functions = [
   scheduleTrialEndingReminders,
   handlePaymentFailed,
   cleanupStripeEvents,
+  propagateGlobalDeckChange,
+  propagateGlobalCardChange,
 ];
 
-// Silence unused import warning while keeping `lt` available for future scheduled queries.
-void lt;
+// Silence unused import warning while keeping `inArray` available for future fan-out jobs.
+void inArray;

@@ -39,6 +39,9 @@ export const tenantStatusEnum = pgEnum("tenant_status", [
   "failed",
   "deleted",
 ]);
+export const cardTypeEnum = pgEnum("card_type", ["basic", "image", "audio", "cloze"]);
+export const accessTierEnum = pgEnum("access_tier", ["free", "pro", "premium"]);
+export const contentSourceEnum = pgEnum("content_source", ["global", "tenant"]);
 
 /* ------------------------------------------------------------------ */
 /* users                                                               */
@@ -253,6 +256,156 @@ export const userRegions = pgTable(
 );
 
 /* ------------------------------------------------------------------ */
+/* GLOBAL CONTENT CATALOG — `global_decks` and `global_cards` are the   */
+/* canonical, platform-owned source of truth. They live OUTSIDE tenant  */
+/* RLS and are readable by every tenant. Tenants reference them by      */
+/* default and only fork (clone) when they need to customize a row.     */
+/* ------------------------------------------------------------------ */
+export const globalDecks = pgTable(
+  "global_decks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    /** Region this deck belongs to. Cards inherit the deck's region. */
+    regionId: uuid("region_id")
+      .notNull()
+      .references(() => regions.id, { onDelete: "restrict" }),
+    accessTier: accessTierEnum("access_tier").notNull().default("free"),
+    /** Surface attribution / category labels on the customer UI. */
+    tags: jsonb("tags").notNull().default(sql`'[]'::jsonb`),
+    coverImageUrl: text("cover_image_url"),
+    displayOrder: integer("display_order").notNull().default(0),
+    /** Monotonic version bumped on every published change. Used by recall pipeline. */
+    version: integer("version").notNull().default(1),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("global_decks_slug_idx").on(t.slug),
+    index("global_decks_region_idx").on(t.regionId),
+    index("global_decks_active_order_idx").on(t.isActive, t.displayOrder),
+  ],
+);
+
+export const globalCards = pgTable(
+  "global_cards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    globalDeckId: uuid("global_deck_id")
+      .notNull()
+      .references(() => globalDecks.id, { onDelete: "cascade" }),
+    cardType: cardTypeEnum("card_type").notNull().default("basic"),
+    /** Prompt side. Markdown allowed. */
+    front: text("front").notNull(),
+    /** Answer side. Markdown allowed. */
+    back: text("back").notNull(),
+    /** Optional supporting media URLs. */
+    imageUrl: text("image_url"),
+    audioUrl: text("audio_url"),
+    /** Optional progressive hint stack, displayed in order. */
+    hints: jsonb("hints").notNull().default(sql`'[]'::jsonb`),
+    /** Optional structured fields for cloze/quiz variants. */
+    payload: jsonb("payload").notNull().default(sql`'{}'::jsonb`),
+    displayOrder: integer("display_order").notNull().default(0),
+    version: integer("version").notNull().default(1),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("global_cards_deck_idx").on(t.globalDeckId, t.displayOrder),
+    index("global_cards_active_idx").on(t.isActive),
+  ],
+);
+
+/*
+ * TENANT CONTENT FORKS — created lazily when a tenant admin edits a
+ * global row, OR authored from scratch by a tenant admin.
+ *   - global_deck_id IS NULL  -> tenant-original deck
+ *   - global_deck_id NOT NULL -> fork of a global deck
+ *
+ * overridden_fields records which JSON keys the tenant has diverged
+ * on. Any field NOT listed there continues to inherit the global row
+ * at read time. This is the hybrid "reference-by-default, clone-on-edit"
+ * model.
+ */
+export const tenantDecks = pgTable(
+  "tenant_decks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** Nullable: NULL = tenant-original, non-null = fork of a global deck. */
+    globalDeckId: uuid("global_deck_id").references(() => globalDecks.id, { onDelete: "set null" }),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    regionId: uuid("region_id")
+      .notNull()
+      .references(() => regions.id, { onDelete: "restrict" }),
+    accessTier: accessTierEnum("access_tier").notNull().default("free"),
+    tags: jsonb("tags").notNull().default(sql`'[]'::jsonb`),
+    coverImageUrl: text("cover_image_url"),
+    displayOrder: integer("display_order").notNull().default(0),
+    /** Array of column names (string[]) the tenant has overridden. */
+    overriddenFields: jsonb("overridden_fields").notNull().default(sql`'[]'::jsonb`),
+    isPublished: boolean("is_published").notNull().default(true),
+    isArchived: boolean("is_archived").notNull().default(false),
+    /** Snapshot of the global deck version at the time of fork. */
+    sourceVersion: integer("source_version"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tenant_decks_tenant_slug_idx").on(t.tenantId, t.slug),
+    // One fork per (tenant, global deck) — prevents accidental duplicate forks.
+    uniqueIndex("tenant_decks_tenant_global_idx")
+      .on(t.tenantId, t.globalDeckId)
+      .where(sql`global_deck_id IS NOT NULL`),
+    index("tenant_decks_tenant_region_idx").on(t.tenantId, t.regionId),
+  ],
+);
+
+export const tenantCards = pgTable(
+  "tenant_cards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    tenantDeckId: uuid("tenant_deck_id")
+      .notNull()
+      .references(() => tenantDecks.id, { onDelete: "cascade" }),
+    /** Nullable: NULL = tenant-original card, non-null = fork of a global card. */
+    globalCardId: uuid("global_card_id").references(() => globalCards.id, { onDelete: "set null" }),
+    cardType: cardTypeEnum("card_type").notNull().default("basic"),
+    front: text("front").notNull(),
+    back: text("back").notNull(),
+    imageUrl: text("image_url"),
+    audioUrl: text("audio_url"),
+    hints: jsonb("hints").notNull().default(sql`'[]'::jsonb`),
+    payload: jsonb("payload").notNull().default(sql`'{}'::jsonb`),
+    displayOrder: integer("display_order").notNull().default(0),
+    overriddenFields: jsonb("overridden_fields").notNull().default(sql`'[]'::jsonb`),
+    sourceVersion: integer("source_version"),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tenant_cards_deck_idx").on(t.tenantDeckId, t.displayOrder),
+    uniqueIndex("tenant_cards_tenant_global_idx")
+      .on(t.tenantId, t.globalCardId)
+      .where(sql`global_card_id IS NOT NULL`),
+    index("tenant_cards_tenant_idx").on(t.tenantId),
+  ],
+);
+
+/* ------------------------------------------------------------------ */
 /* invitations                                                         */
 /* ------------------------------------------------------------------ */
 export const invitations = pgTable(
@@ -362,4 +515,28 @@ export const userRegionsRelations = relations(userRegions, ({ one }) => ({
   tenant: one(tenants, { fields: [userRegions.tenantId], references: [tenants.id] }),
   user: one(users, { fields: [userRegions.userId], references: [users.id] }),
   region: one(regions, { fields: [userRegions.regionId], references: [regions.id] }),
+}));
+
+export const globalDecksRelations = relations(globalDecks, ({ one, many }) => ({
+  region: one(regions, { fields: [globalDecks.regionId], references: [regions.id] }),
+  cards: many(globalCards),
+  forks: many(tenantDecks),
+}));
+
+export const globalCardsRelations = relations(globalCards, ({ one, many }) => ({
+  deck: one(globalDecks, { fields: [globalCards.globalDeckId], references: [globalDecks.id] }),
+  forks: many(tenantCards),
+}));
+
+export const tenantDecksRelations = relations(tenantDecks, ({ one, many }) => ({
+  tenant: one(tenants, { fields: [tenantDecks.tenantId], references: [tenants.id] }),
+  region: one(regions, { fields: [tenantDecks.regionId], references: [regions.id] }),
+  source: one(globalDecks, { fields: [tenantDecks.globalDeckId], references: [globalDecks.id] }),
+  cards: many(tenantCards),
+}));
+
+export const tenantCardsRelations = relations(tenantCards, ({ one }) => ({
+  tenant: one(tenants, { fields: [tenantCards.tenantId], references: [tenants.id] }),
+  deck: one(tenantDecks, { fields: [tenantCards.tenantDeckId], references: [tenantDecks.id] }),
+  source: one(globalCards, { fields: [tenantCards.globalCardId], references: [globalCards.id] }),
 }));

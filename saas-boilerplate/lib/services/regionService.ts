@@ -11,7 +11,7 @@
  */
 import { db } from "@/lib/db";
 import { regions, userRegions, tenantSettings, subscriptions } from "@/lib/db/schema";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, notInArray } from "drizzle-orm";
 import { withTenant, type TenantContext } from "@/lib/db/with-tenant";
 import { billingConfig, type PlanId } from "@/lib/config/billing";
 import { logAudit } from "@/lib/audit/log";
@@ -161,7 +161,7 @@ export async function setUserRegions(
         and(
           eq(userRegions.tenantId, ctx.tenantId),
           eq(userRegions.userId, ctx.userId),
-          sql`region_id NOT IN ${ids}`,
+          notInArray(userRegions.regionId, ids),
         ),
       );
 

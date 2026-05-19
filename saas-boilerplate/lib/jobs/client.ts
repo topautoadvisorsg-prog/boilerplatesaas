@@ -13,4 +13,8 @@ export type AppEvents = {
   "billing/trial-ending": { data: { subscriptionId: string } };
   "billing/payment-failed": { data: { subscriptionId: string } };
   "stripe/cleanup-events": Record<string, never>;
+  /** Fired when the platform updates a `global_decks` row. */
+  "content/global.deck-changed": { data: { globalDeckId: string; version: number } };
+  /** Fired when the platform updates a `global_cards` row. */
+  "content/global.card-changed": { data: { globalCardId: string; version: number } };
 };

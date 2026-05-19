@@ -29,14 +29,22 @@
   - Audit actions: `REGION_SELECTED`, `REGION_PRIMARY_CHANGED`, `REGION_REMOVED`
   - `scripts/seed-regions.ts` idempotent seed of 10 NA wilderness regions + `pnpm db:seed-regions` script
   - `tenant_settings.enabled_region_ids` filter wired in
+  - Bugfix: `setUserRegions` now uses `notInArray()` (Drizzle) instead of an unsafe `sql\`region_id NOT IN ${ids}\`` template — prevents single-param mis-binding when removing dropped regions.
+- ✅ **Phase 3** — Content schema + recall pipeline (hybrid: reference-by-default, clone-on-edit)
+  - 4 new tables: `global_decks`, `global_cards` (global, no RLS) + `tenant_decks`, `tenant_cards` (RLS-scoped, with `global_*_id` lineage)
+  - `cardType` / `accessTier` / `contentSource` enums + version columns + `overridden_fields` jsonb + partial unique indexes (fork de-dupe)
+  - `contentService` (read: `listDecksForUser` / `getDeckForUser` / `listCardsForDeck`; tenant write: `forkGlobalDeck` / `updateDeck` / `updateCard` / `createTenantDeck` / `createTenantCard`; platform write: `updateGlobalDeck` / `updateGlobalCard`)
+  - Plan-tier gating via `TIER_RANK` (free/pro/premium); lapsed subs downgraded to free for access checks
+  - Inngest events `content/global.deck-changed` / `content/global.card-changed` + functions `propagateGlobalDeckChange` / `propagateGlobalCardChange` — bump `source_version` on every fork and act as the cache-invalidation hook for Phases 4-5
+  - 10 new audit actions for content lifecycle
+  - `scripts/seed-content.ts` (3 starter decks: PNW Conifers free / Rocky Mtn Mammals free / Desert SW Flora pro) wired as `pnpm db:seed-content`
 
-## Quality gates after Phase 2
+## Quality gates after Phase 3
 - `tsc --noEmit`: **0 errors**
 - `eslint`: **0 errors, 0 warnings**
 - Branding grep: clean
 
 ## Phase plan (remaining)
-- **Phase 3** — Content schema + global→tenant clone pipeline + recall propagation — 2-3d
 - **Phase 4** — Study engine (FSRS, UserCardState, StudySession, daily limit, streak service) — 3-4d
 - **Phase 5** — Recommendation engine — 1d
 - **Phase 6** — Tenant Admin CMS (deck/card editor, region toggles, access tiers) — 2-3d

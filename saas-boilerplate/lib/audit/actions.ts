@@ -25,6 +25,20 @@ export const AUDIT_ACTIONS = {
   REGION_REMOVED: "region.removed",
   REGION_PRIMARY_CHANGED: "region.primary_changed",
 
+  // Content (tenant CMS)
+  CONTENT_DECK_FORKED: "content.deck_forked",
+  CONTENT_DECK_CREATED: "content.deck_created",
+  CONTENT_DECK_UPDATED: "content.deck_updated",
+  CONTENT_DECK_ARCHIVED: "content.deck_archived",
+  CONTENT_CARD_FORKED: "content.card_forked",
+  CONTENT_CARD_CREATED: "content.card_created",
+  CONTENT_CARD_UPDATED: "content.card_updated",
+  CONTENT_CARD_ARCHIVED: "content.card_archived",
+
+  // Content (global, platform-admin)
+  CONTENT_GLOBAL_DECK_UPDATED: "content.global_deck_updated",
+  CONTENT_GLOBAL_CARD_UPDATED: "content.global_card_updated",
+
   // Admin
   ADMIN_TENANT_ACCESSED: "admin.tenant_accessed",
   ADMIN_USER_ACCESSED: "admin.user_accessed",

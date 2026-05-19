@@ -3,6 +3,50 @@
 All notable changes to the SaaS boilerplate are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — 2026-02-XX — Phase 3: Content schema + recall pipeline
+
+### Added — Schema (hybrid content model)
+- New enums: `card_type` (basic/image/audio/cloze), `access_tier` (free/pro/premium), `content_source` (global/tenant).
+- `global_decks` (GLOBAL, no RLS): `slug` unique, `name`, `description`, `region_id` FK, `access_tier`, `tags` jsonb, `cover_image_url`, `display_order`, `version` (bumped on every published edit — drives recall pipeline), `is_active`.
+- `global_cards` (GLOBAL, no RLS): `global_deck_id` FK (cascade), `card_type`, `front`, `back`, `image_url`, `audio_url`, `hints` jsonb, `payload` jsonb (cloze/quiz variants), `display_order`, `version`, `is_active`.
+- `tenant_decks` (RLS-scoped): `tenant_id`, `global_deck_id` nullable (NULL = tenant-original, NOT NULL = fork of a global deck), `slug` unique per tenant, `overridden_fields` jsonb (tracks which columns have diverged from the global parent), `is_published`, `is_archived`, `source_version` (snapshot of `global_decks.version` at fork time). Partial unique index on `(tenant_id, global_deck_id) WHERE global_deck_id IS NOT NULL` prevents duplicate forks.
+- `tenant_cards` (RLS-scoped): `tenant_id`, `tenant_deck_id` FK, `global_card_id` nullable, same content columns as `global_cards`, `overridden_fields`, `source_version`. Partial unique on `(tenant_id, global_card_id) WHERE global_card_id IS NOT NULL`.
+
+### Added — RLS
+- `tenant_decks` policy `td_tenant_isolation` and `tenant_cards` policy `tc_tenant_isolation` (USING + WITH CHECK on `tenant_id = app_current_tenant_id()`). Global tables intentionally NOT under RLS.
+
+### Added — Service layer (`lib/services/contentService.ts`)
+- **Reads** (hybrid resolution — UNIONs globals + forks, applies field-level inheritance for non-overridden columns):
+  - `listDecksForUser(ctx)` — user-visible decks across globals + tenant forks/originals, filtered by visible regions + plan tier
+  - `getDeckForUser(ctx, deckId)` — resolves a single deck (tenant first, then global) with access checks
+  - `listCardsForDeck(ctx, deckId)` — cards within a deck, UNIONing inherited globals + tenant overrides
+- **Writes** (clone-on-edit):
+  - `forkGlobalDeck(ctx, globalDeckId)` — idempotent shell fork; cards stay inherited until edited
+  - `updateDeck(ctx, deckId, patch)` — lazy-forks if the caller hands us a global id; appends touched fields to `overridden_fields`
+  - `updateCard(ctx, cardId, patch)` — same, but forks BOTH the parent deck and the card on first edit
+  - `createTenantDeck(ctx, input)` — tenant-original deck (no global parent)
+  - `createTenantCard(ctx, input)` — tenant-original card under a tenant deck
+- **Platform-admin writes** (no tenant context):
+  - `updateGlobalDeck(globalDeckId, patch, actor)` — bumps `version`, dispatches `content/global.deck-changed` Inngest event
+  - `updateGlobalCard(globalCardId, patch, actor)` — same for cards
+- Role gate: only `owner`/`admin` may mutate content; `member` is read-only.
+- Plan gate: `TIER_RANK` (free=0, pro=1, premium=2). Decks above the caller's tier are filtered out of reads and throw `ContentAccessError` on direct lookup. Lapsed subscriptions are downgraded to `free` for access checks.
+
+### Added — Inngest event types + functions (`lib/jobs/`)
+- New event types: `content/global.deck-changed` and `content/global.card-changed` (both carry `{ id, version }`).
+- New functions: `propagateGlobalDeckChange` and `propagateGlobalCardChange` — bulk-update `source_version` on every fork so admins can see how stale their fork is, and act as the hook point for future cache invalidation / search-index reindex / recommendation recompute.
+
+### Added — Audit actions
+- `CONTENT_DECK_FORKED`, `CONTENT_DECK_CREATED`, `CONTENT_DECK_UPDATED`, `CONTENT_DECK_ARCHIVED`, `CONTENT_CARD_FORKED`, `CONTENT_CARD_CREATED`, `CONTENT_CARD_UPDATED`, `CONTENT_CARD_ARCHIVED`, `CONTENT_GLOBAL_DECK_UPDATED`, `CONTENT_GLOBAL_CARD_UPDATED`.
+
+### Added — Seed
+- `scripts/seed-content.ts` — idempotent (decks upsert by `slug`; cards keyed by `payload.key` + `global_deck_id`). Seeds 3 starter decks: PNW Conifers (free), Rocky Mountain Mammals (free), Desert Southwest Flora (pro). Wired as `pnpm db:seed-content`.
+
+### Notes — Architectural decisions
+- **Hybrid model (reference-by-default, clone-on-edit)** chosen over "always-clone" or "reference-only". Globals stay canonical; tenants only pay storage cost when they actually customize a row. Non-overridden fields keep inheriting upstream updates at read time.
+- **Lineage preserved** via `global_deck_id` / `global_card_id` on forks, so Phase 4 study state can follow the upstream link if a fork is created after a user has been studying the global card.
+- **Field-level inheritance** is resolved in the application layer (not via Postgres views) so the rules can evolve without a migration.
+
 ## [1.6.0] — 2026-01-XX — Phase 2: Region system
 
 ### Added — Schema

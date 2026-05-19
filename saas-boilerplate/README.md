@@ -48,6 +48,8 @@ lib/
     inviteService.ts              invites + accept + remove member
     billingService.ts             Stripe checkout + portal
     subscriptionService.ts        Stripe webhook handlers
+    regionService.ts              region catalog + per-user selection (plan-gated)
+    contentService.ts             hybrid deck/card layer (reference-by-default, clone-on-edit)
 
   db/                             schema, drizzle client, withTenant() helper
   auth/                           current user, admin gating
@@ -91,6 +93,10 @@ sentry.{client,server,edge}.config.ts
 | `invite_rate_limit` | Postgres-backed rate limiter | No (per-tenant bucket) | `tenant_id` PK, `window_start`, `count` |
 | `regions` | Global catalog of regions/territories | **No (global)** — readable by all tenants | `slug`, `name`, `description`, `parent_region_id`, `bounding_box` jsonb, `accent_color`, `display_order`, `is_active`. Seeded via `pnpm db:seed-regions`. |
 | `user_regions` | User's selected regions | Yes (RLS) | `tenant_id`, `user_id`, `region_id`, `is_primary`. Partial unique index enforces "1 primary per user". Plan limit (`maxActiveRegions`) enforced in service layer. |
+| `global_decks` | Platform-owned canonical decks (hybrid catalog) | **No (global)** — readable by all tenants | `slug`, `name`, `region_id`, `access_tier` (free/pro/premium), `tags` jsonb, `display_order`, `version` (bumped on edit), `is_active`. Seeded via `pnpm db:seed-content`. |
+| `global_cards` | Platform-owned canonical cards | **No (global)** — readable by all tenants | `global_deck_id`, `card_type` (basic/image/audio/cloze), `front`, `back`, `image_url`, `audio_url`, `hints` jsonb, `payload` jsonb, `display_order`, `version`, `is_active` |
+| `tenant_decks` | Tenant fork OR tenant-original deck | Yes (RLS) | `tenant_id`, `global_deck_id` (nullable = tenant-original), `slug`, `name`, `region_id`, `access_tier`, `overridden_fields` jsonb (which columns have diverged), `is_published`, `is_archived`, `source_version`. Partial unique on `(tenant_id, global_deck_id)` prevents duplicate forks. |
+| `tenant_cards` | Tenant fork OR tenant-original card | Yes (RLS) | `tenant_id`, `tenant_deck_id`, `global_card_id` (nullable), `card_type`, `front`, `back`, `image_url`, `audio_url`, `hints` jsonb, `payload` jsonb, `overridden_fields` jsonb, `source_version` |
 
 ---
 
@@ -208,6 +214,23 @@ Each subsystem documented as: **what it does · where it lives · how to modify 
   - Switch the catalog to a totally different concept (e.g., industries, languages) → keep the schema, replace seed data + service variable names; the `tenant_settings.enabled_region_ids` filter logic still applies
   - Drop the region system entirely → delete the two tables, the service, the seed, and the RLS policy. Nothing else depends on it.
 
+### 9. Content (decks & cards) *(product layer — v1.7)*
+- **What**: Hybrid content model — *reference-by-default, clone-on-edit*. The platform owns a canonical catalog in `global_decks` / `global_cards`; every tenant reads it for free. The first time a tenant admin edits a global row (or authors a net-new one), a `tenant_decks` / `tenant_cards` row is created with `global_*_id` linkage and an `overridden_fields` array. At read time the resolver UNIONs globals + forks, and any field a tenant has NOT overridden continues to inherit fresh values from the global parent. A platform-side update bumps `global_*.version` and dispatches an Inngest event so each fork's `source_version` reflects how stale it is.
+- **Where**:
+  - `lib/db/schema.ts` — `global_decks`, `global_cards` (no RLS), `tenant_decks`, `tenant_cards` (RLS-scoped), plus `cardTypeEnum`, `accessTierEnum`, `contentSourceEnum`
+  - `lib/services/contentService.ts` — `listDecksForUser`, `getDeckForUser`, `listCardsForDeck`, `forkGlobalDeck`, `updateDeck`, `updateCard`, `createTenantDeck`, `createTenantCard`, `updateGlobalDeck`, `updateGlobalCard`, `ContentNotFoundError`, `ContentAccessError`
+  - `drizzle/rls.sql` — `td_tenant_isolation` and `tc_tenant_isolation` policies
+  - `lib/jobs/functions.ts` — `propagateGlobalDeckChange`, `propagateGlobalCardChange` Inngest jobs (recall pipeline hooks)
+  - `lib/jobs/client.ts` — `content/global.deck-changed`, `content/global.card-changed` event types
+  - `lib/audit/actions.ts` — `CONTENT_DECK_*`, `CONTENT_CARD_*`, `CONTENT_GLOBAL_*`
+  - `scripts/seed-content.ts` — idempotent global deck + card seed (upserts by deck slug, cards by `payload.key`)
+- **How to modify**:
+  - Add/edit global content → edit the `SEED` array in `scripts/seed-content.ts`, then `pnpm db:seed-content`. Production edits should go through `updateGlobalDeck` / `updateGlobalCard` so the version bump + Inngest event fire.
+  - Add a card type → extend `cardTypeEnum` in `schema.ts` + handle the new variant in `payload` JSON; no service change needed.
+  - Tighten or loosen plan gating → adjust the tier ranking in `contentService.ts:TIER_RANK` or change `accessTier` on individual decks. Lapsed subscriptions are forced back to `free` for access checks.
+  - Force a re-sync on a fork → null out `tenant_decks.overridden_fields` (drops back to full inheritance) or delete the `tenant_decks` row (re-forks lazily on next edit).
+  - Wire FSRS / study state → use the resolved `ResolvedCard.id` as the foreign key; the `global_card_id` link is preserved on tenant forks so study state can follow lineage in Phase 4.
+
 ---
 
 ## Quick start
@@ -308,7 +331,7 @@ Run these in this exact order the first time:
    - Inngest project → grab event key + signing key
    - Sentry project → grab DSN
 2. **Fill `.env.local`** from `.env.example`. Boot will refuse if anything is missing.
-3. **Database**: `pnpm db:generate && pnpm db:migrate && pnpm db:rls && pnpm db:seed-regions`
+3. **Database**: `pnpm db:generate && pnpm db:migrate && pnpm db:rls && pnpm db:seed-regions && pnpm db:seed-content`
 4. **Local subdomains**: add hosts entries (`acme.localhost`, `admin.localhost`)
 5. **Start app**: `pnpm dev`
 6. **Webhook tunnels** (separate terminals — wait until step 5 is up):
@@ -330,6 +353,7 @@ pnpm db:migrate           # apply pending migrations
 pnpm db:push              # ⚠️ dev only — skip migration files, push schema directly
 pnpm db:rls               # apply Row-Level Security policies
 pnpm db:seed-regions      # seed/refresh the global regions catalog (idempotent)
+pnpm db:seed-content      # seed/refresh the global decks + cards catalog (idempotent)
 
 pnpm inngest:dev          # local Inngest dev server (UI at http://localhost:8288)
 ```
