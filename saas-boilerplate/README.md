@@ -1,4 +1,121 @@
-# SaaS Boilerplate — v1.6
+# Wilderness Intelligence — built on the SaaS Engine v1.7
+
+A B2C wilderness-knowledge flash-cards SaaS, multi-tenant-ready under the hood. The codebase is a reusable engine (auth, RLS, billing, jobs, observability) with the Wilderness Intelligence product built on top of it as feature layers.
+
+---
+
+## Part 1 — Wilderness Intelligence (the product)
+
+### 1.1 Product summary
+A spaced-repetition flash-cards app that teaches users to identify plants, animals, terrain, weather, and field skills for the wilderness region they spend time in. Users pick one or more North American regions; the app serves them region-relevant decks, runs a science-backed study engine (FSRS), and tracks daily streaks and progress. Free tier converts to Pro ($4.99/mo) or Premium ($9.99/mo) via a 14-day Pro trial.
+
+### 1.2 Who it's for
+- **Primary**: weekend hikers, hunters, anglers, backpackers, naturalists who want to deepen their field knowledge.
+- **Secondary**: outdoor educators, scout leaders, guide-school students.
+- **B2B (Phase 3+)**: outdoor brands, guide services, parks/conservation orgs that want to white-label the platform for their members. The multi-tenant infra is already in place; B2B onboarding UX is post-MVP.
+
+### 1.3 Headline experience (the loop)
+1. **Onboard**: sign in → pick your region(s) → set a daily goal in minutes.
+2. **Home dashboard**: today's recommended cards (due reviews + new), streak count, recent decks.
+3. **Study**: card front → flip → self-rate (`Again` / `Hard` / `Good` / `Easy`) → FSRS schedules the next interval → server records the rating + bumps streak.
+4. **Library**: browse all decks visible to your region(s) + plan tier; star, archive, deep-link.
+5. **Progress**: per-region mastery, retention curve, streak calendar.
+6. **Profile / Billing**: trial state, plan, region capacity.
+
+### 1.4 Plans (locked Phase 1A)
+| | **Free** | **Pro $4.99/mo** | **Premium $9.99/mo** |
+|---|---|---|---|
+| Daily card limit | **20** | unlimited | unlimited |
+| Active regions | **1** | unlimited | unlimited |
+| Decks visible | 3 | unlimited | unlimited |
+| Audio cards | — | — | ✓ |
+| Advanced progress / retention curves | — | ✓ | ✓ |
+| AI card generation | — | — | ✓ |
+| Priority support | — | — | ✓ |
+| 14-day Pro trial | new sign-ups auto-enrolled in Pro trial; downgrades to Free on lapse, retains read-only access |
+
+Plans live in `lib/config/billing.ts`. Lapsed subscriptions (`past_due` / `unpaid` / `incomplete_expired`) are treated as Free for all access checks.
+
+### 1.5 Content architecture (hybrid: reference-by-default, clone-on-edit)
+The platform ships a canonical library in `global_decks` / `global_cards`. Every tenant reads it for free. The first time a tenant admin **edits** a global deck or card (or **authors** a new one), a `tenant_decks` / `tenant_cards` row is created with `global_*_id` lineage and an `overridden_fields` array. Non-overridden fields keep inheriting fresh values from the global parent at read time. A platform-side edit bumps `global_*.version` and dispatches an Inngest event so every fork's `source_version` reflects how stale it is.
+
+**Why this model**: globals stay canonical (one source of truth for recall propagation, search, analytics); tenants only pay storage cost when they actually customize a row; lineage is preserved so Phase 4 study state can follow the upstream card through a fork. See `lib/services/contentService.ts` and Phase 3 in CHANGELOG.
+
+### 1.6 Region system
+North America is divided into 10 wilderness regions (`scripts/seed-regions.ts`): Pacific Northwest, Rocky Mountains, Sierra Nevada, Desert Southwest, Great Basin, Appalachians, Great Lakes & Northwoods, Canadian Boreal, Atlantic & Gulf Coastal Plains, Subtropical Florida. The map is a hand-drawn SVG (Phase 7 art). Each region carries an accent color + bounding box.
+
+Users select 1–N regions (Free capped at 1; paid unlimited). Exactly one is `is_primary` (DB-enforced via partial unique index). Tenants can restrict the visible region set via `tenant_settings.enabled_region_ids` (empty array = all 10).
+
+### 1.7 Study engine — FSRS *(Phase 4, not yet shipped)*
+- Open-source [FSRS](https://github.com/open-spaced-repetition/ts-fsrs) algorithm replaces SM-2.
+- Per-user, per-card state in `user_card_state`: `due_date`, `stability`, `difficulty`, `last_review`, `reviews`, `lapses`, optimistic-locking `version` column.
+- `study_session` table: one row per session, capped at the daily limit for Free users (20 cards). Sessions are append-only; ratings stream into `user_card_state` via optimistic CAS.
+- Streak service: nightly Inngest cron reconciles `users.streak_count` and `users.last_study_date` using the user's `timezone` column (no naive UTC math).
+
+### 1.8 Recommendation engine — *(Phase 5, not yet shipped)*
+Rule-based scoring, NOT ML:
+- Due reviews first (FSRS overdue ratio).
+- Mix in new cards capped by daily goal.
+- Boost primary region; weight secondary regions lower.
+- 5-minute server-side cache per `(tenant_id, user_id)` to keep dashboard fast.
+
+### 1.9 Tenant Admin CMS — *(Phase 6, not yet shipped)*
+- Deck list with origin badge (`Global` / `Forked from global` / `Tenant-original`).
+- Card editor (front/back markdown, image, audio URL, hints, payload, card type).
+- Region toggle and access-tier picker per deck.
+- "X fields diverged from global" diff badge on forks.
+- Region whitelist editor → writes `tenant_settings.enabled_region_ids`.
+
+### 1.10 Customer frontend — *(Phase 7, not yet shipped)*
+**Design system**: "Field Journal" — parchment paper background, forest-green accents, hand-lettered display font, slate-gray serif body. Custom SVG map of NA regions. Card flip uses CSS 3D transform + light shadow. No emoji icons (use lucide-react / FontAwesome).
+
+**Screens**: onboarding (region picker + daily-goal slider) → home (today's queue + streak + recent decks) → study (card flip + 4-button rate) → library (deck grid by region) → progress (calendar + per-region mastery) → profile/billing.
+
+### 1.11 Monetization — *(Phase 8, not yet shipped)*
+- 14-day Pro trial auto-enrolled on sign-up (Stripe `trial_period_days`).
+- Day-11 reminder email via Inngest (`scheduleTrialEndingReminders`).
+- Paywalls: locked decks (above tier) show "Upgrade to unlock" CTA; soft paywall at 20-card limit with "Continue with Pro" inline CTA.
+- Promo codes via Stripe Coupons; admin can attach to checkout URL.
+- Resubscribe UX preserves `subscriptions.previously_unlocked_deck_ids` so churned users land back in their old library.
+
+### 1.12 Retention emails — *(Phase 9, not yet shipped)*
+- Streak warning (24h before break) — Inngest cron, idempotent via per-day `*_sent_at`.
+- Weekly summary (Monday 9am local) — cards reviewed, streak, top region.
+- Trial-ending reminder (already shipped — engine-level).
+- Per-type unsubscribe via `users.email_unsubscribed_types` jsonb (e.g. `["streak-warning"]`).
+
+### 1.13 Build status — 9-phase plan
+| Phase | Scope | Status |
+|---|---|---|
+| **0** | Engine: auth, RLS, tenancy, jobs, billing infra, admin UI, white-label config | ✅ Shipped (v1.0–v1.4) |
+| **1** | User-scoped billing refactor, plan rename, `tenant_settings`, plan limits redesigned | ✅ Shipped (v1.5) |
+| **2** | Region system: `regions` global + `user_regions` RLS, plan-tier capacity, seed | ✅ Shipped (v1.6) |
+| **3** | Content schema: hybrid global/tenant decks + cards, clone-on-edit, recall pipeline hooks | ✅ Shipped (v1.7) |
+| **4** | Study engine: FSRS, `user_card_state`, `study_session`, daily limit, streak cron | ⏭ Next |
+| **5** | Recommendation engine: rule-based scoring + 5-min cache | ⏳ Pending |
+| **6** | Tenant Admin CMS: deck/card editor, region toggles, access-tier picker | ⏳ Pending |
+| **7** | Customer frontend: Field Journal design system + 6 screens | ⏳ Pending |
+| **8** | Monetization wire-up: trial, paywalls, promo codes | ⏳ Pending |
+| **9** | Retention emails: streak warnings, weekly summary, per-type unsubscribe | ⏳ Pending |
+
+### 1.14 Quality gates (every phase must pass before merge)
+- `pnpm typecheck` → 0 errors
+- `pnpm lint` → 0 errors / 0 warnings
+- Every mutation goes through `lib/services/*` (no inline DB in route handlers)
+- Every tenant-scoped query runs through `withTenant()` (RLS enforced)
+- README + CHANGELOG updated in the same commit as the feature
+
+### 1.15 Architectural decisions (locked)
+- **Billing**: tenant = scope/billing-container, user = entitlement-holder. Subscriptions `(tenant_id, user_id)` unique.
+- **Phase 1A UX**: single app, no subdomain UI, one auto-seeded default tenant. Multi-tenant infra intact for B2B in Phase 3+.
+- **Map**: custom hand-drawn SVG, NOT a third-party map library.
+- **Audio cards**: Premium tier only, shipped in Phase 4 (badge as "Coming soon" until then).
+- **No XP / no badges** — streaks are the only retention mechanic (per blueprint).
+- **Content authoring**: tenant admins author/customize via the CMS in Phase 6. Pre-Phase-6, content seeded via `pnpm db:seed-content`.
+
+---
+
+## Part 2 — SaaS Engine v1.7 (the foundation)
 
 A reusable, white-label multi-tenant SaaS engine. Drop in product features on top of a fully-wired auth, billing, team, jobs, and observability stack.
 
@@ -7,6 +124,8 @@ A reusable, white-label multi-tenant SaaS engine. Drop in product features on to
 > **Billing model (v1.5)**: subscriptions are **user-scoped within a tenant** — tenant = scope/billing-container, user = entitlement-holder. Default plans: Free / Pro $4.99 / Premium $9.99 (rename in `lib/config/billing.ts` per product).
 >
 > **Regions (v1.6)**: optional global region catalog (`regions` table) + per-user selection (`user_regions`, RLS-scoped). Region capacity gated by `PlanLimits.maxActiveRegions`. Seeded by `pnpm db:seed-regions`.
+>
+> **Content (v1.7)**: optional hybrid content layer — `global_decks` / `global_cards` (canonical, no RLS) + `tenant_decks` / `tenant_cards` (RLS-scoped forks). Reference-by-default, clone-on-edit. Seeded by `pnpm db:seed-content`.
 
 ## System overview
 
