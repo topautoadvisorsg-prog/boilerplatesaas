@@ -19,6 +19,7 @@ import { studyReview, users } from "@/lib/db/schema";
 import { and, eq, gte, sql } from "drizzle-orm";
 import { logAudit } from "@/lib/audit/log";
 import { AUDIT_ACTIONS } from "@/lib/audit/actions";
+import type { AuditAction } from "@/lib/audit/actions";
 
 export interface StreakOutcome {
   userId: string;
@@ -95,7 +96,7 @@ export async function reconcileStreak(userId: string): Promise<StreakOutcome | n
 
   const prev = user.streakCount;
   let next = prev;
-  let auditAction: string | null = null;
+  let auditAction: AuditAction | null = null;
 
   if (reviewedToday) {
     if (user.lastStudyDate && localDate(user.lastStudyDate, tz) === today) {
@@ -130,7 +131,7 @@ export async function reconcileStreak(userId: string): Promise<StreakOutcome | n
     await logAudit({
       tenantId: null,
       userId,
-      action: auditAction as typeof AUDIT_ACTIONS.STREAK_INCREMENTED,
+      action: auditAction,
       metadata: { prev, next, tz, today, reviewedToday, reviewedYesterday },
     });
   }

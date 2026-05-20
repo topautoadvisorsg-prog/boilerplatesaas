@@ -24,11 +24,10 @@ import {
   studyReview,
   globalCards,
   tenantCards,
-  tenantDecks,
   subscriptions,
   userRegions,
 } from "@/lib/db/schema";
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { withTenant, type TenantContext } from "@/lib/db/with-tenant";
 import { billingConfig, type PlanId } from "@/lib/config/billing";
 import { logAudit } from "@/lib/audit/log";
@@ -266,8 +265,10 @@ export async function endSession(ctx: TenantContext, sessionId: string): Promise
  *   1. Cards already in `user_card_state` whose `due <= now` (oldest first).
  *   2. Cards in the deck not yet seen — pick by `displayOrder`.
  *
- * Returns `null` (via `card: undefined`-like shape) is not possible — we
- * always return a card unless the deck is empty, in which case we throw.
+ * Lineage-aware: state may have been stored against the global card id
+ * (before a tenant forked it). We look up state by `card_ref IN (...)`
+ * OR `global_card_id IN (...)` so existing history is preserved when the
+ * tenant deck is forked mid-stream.
  */
 export async function getNextCardForDeck(
   ctx: TenantContext,
@@ -279,9 +280,26 @@ export async function getNextCardForDeck(
   const cards = await listCardsForDeck(ctx, deckId);
   if (cards.length === 0) throw new Error("Deck has no cards.");
 
-  // 1) Are any of these cards already due?
   const cardIds = cards.map((c) => c.id);
+  const globalCardIds = cards
+    .map((c) => c.globalCardId)
+    .filter((v): v is string => Boolean(v));
   const now = new Date();
+
+  // Map global ids → resolved card ids so we can identify which physical
+  // card a state row corresponds to even if `card_ref` is the global id.
+  const byGlobalId = new Map<string, string>();
+  for (const c of cards) if (c.globalCardId) byGlobalId.set(c.globalCardId, c.id);
+
+  const stateMatch =
+    globalCardIds.length > 0
+      ? or(
+          inArray(userCardState.cardRef, cardIds),
+          inArray(userCardState.globalCardId, globalCardIds),
+        )
+      : inArray(userCardState.cardRef, cardIds);
+
+  // 1) Any due reviews?
   const dueStates = await withTenant(ctx, async (tx) => {
     return tx
       .select()
@@ -290,7 +308,7 @@ export async function getNextCardForDeck(
         and(
           eq(userCardState.tenantId, ctx.tenantId),
           eq(userCardState.userId, ctx.userId),
-          inArray(userCardState.cardRef, cardIds),
+          stateMatch,
           lte(userCardState.due, now),
         ),
       )
@@ -300,7 +318,10 @@ export async function getNextCardForDeck(
 
   if (dueStates[0]) {
     const state = dueStates[0];
-    const card = cards.find((c) => c.id === state.cardRef);
+    const resolvedId =
+      cards.find((c) => c.id === state.cardRef)?.id ??
+      (state.globalCardId ? byGlobalId.get(state.globalCardId) : undefined);
+    const card = resolvedId ? cards.find((c) => c.id === resolvedId) : undefined;
     if (!card) throw new Error("Due card resolved to missing content row.");
     return {
       card,
@@ -313,21 +334,28 @@ export async function getNextCardForDeck(
   // 2) Pick the lowest-display-order card without state yet.
   const seenIds = await withTenant(ctx, async (tx) => {
     const rows = await tx
-      .select({ cardRef: userCardState.cardRef })
+      .select({ cardRef: userCardState.cardRef, globalCardId: userCardState.globalCardId })
       .from(userCardState)
       .where(
         and(
           eq(userCardState.tenantId, ctx.tenantId),
           eq(userCardState.userId, ctx.userId),
-          inArray(userCardState.cardRef, cardIds),
+          stateMatch,
         ),
       );
-    return new Set(rows.map((r) => r.cardRef));
+    const ids = new Set<string>();
+    for (const r of rows) {
+      ids.add(r.cardRef);
+      if (r.globalCardId) {
+        const resolved = byGlobalId.get(r.globalCardId);
+        if (resolved) ids.add(resolved);
+      }
+    }
+    return ids;
   });
 
   const next = cards.find((c) => !seenIds.has(c.id));
   if (!next) {
-    // Everything in this deck has state but nothing is due yet.
     throw new Error("No cards due. Come back later.");
   }
   return { card: next, state: null, cardStateId: null, dailyUsage };
@@ -427,7 +455,9 @@ export async function rateCard(
 
 /**
  * One rating attempt — returns null on optimistic-lock conflict so the
- * caller can retry once.
+ * caller can retry once. Throws `DailyLimitReachedError` if a concurrent
+ * request consumed the user's remaining cap between the outer check and
+ * the transaction (TOCTOU-safe).
  */
 async function attemptRate(
   ctx: TenantContext,
@@ -435,9 +465,33 @@ async function attemptRate(
   lineage: { source: "global" | "tenant"; globalCardId: string | null; deckId: string },
 ): Promise<Omit<RateCardResult, "dailyUsage"> | null> {
   return withTenant(ctx, async (tx) => {
+    // In-transaction daily-cap recheck (TOCTOU defense).
+    const plan = await getCallerPlan(ctx.tenantId, ctx.userId);
+    const capLimit = billingConfig[plan].limits.dailyCardLimit;
+    if (Number.isFinite(capLimit)) {
+      const dayStart = startOfUtcDay();
+      const [usage] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(studyReview)
+        .where(
+          and(
+            eq(studyReview.tenantId, ctx.tenantId),
+            eq(studyReview.userId, ctx.userId),
+            gte(studyReview.reviewedAt, dayStart),
+          ),
+        );
+      if ((usage?.count ?? 0) >= capLimit) {
+        throw new DailyLimitReachedError(capLimit);
+      }
+    }
+
     // Verify session is active.
     const [session] = await tx
-      .select({ id: studySession.id, endedAt: studySession.endedAt })
+      .select({
+        id: studySession.id,
+        endedAt: studySession.endedAt,
+        ratings: studySession.ratings,
+      })
       .from(studySession)
       .where(
         and(
@@ -450,7 +504,12 @@ async function attemptRate(
     if (!session) throw new NoActiveSessionError();
     if (session.endedAt) throw new NoActiveSessionError();
 
-    // Load (or initialise) the card state.
+    // Load (or initialise) the card state — lineage-aware lookup so a
+    // pre-fork global-keyed state row is still found after the fork.
+    const lookupConditions = [eq(userCardState.cardRef, input.cardId)];
+    if (lineage.globalCardId) {
+      lookupConditions.push(eq(userCardState.globalCardId, lineage.globalCardId));
+    }
     const [existing] = await tx
       .select()
       .from(userCardState)
@@ -458,7 +517,7 @@ async function attemptRate(
         and(
           eq(userCardState.tenantId, ctx.tenantId),
           eq(userCardState.userId, ctx.userId),
-          eq(userCardState.cardRef, input.cardId),
+          lookupConditions.length === 1 ? lookupConditions[0]! : or(...lookupConditions)!,
         ),
       )
       .limit(1);
@@ -469,10 +528,15 @@ async function attemptRate(
 
     let cardStateId: string;
     if (existing) {
-      // Optimistic CAS.
+      // Optimistic CAS. ALSO realign `card_ref` / `card_source` to the
+      // current resolved card id — this is the one-shot migration when a
+      // fork was created after the user started studying the global.
       const [updated] = await tx
         .update(userCardState)
         .set({
+          cardRef: input.cardId,
+          cardSource: lineage.source,
+          globalCardId: lineage.globalCardId,
           state: out.next.state,
           due: out.next.due,
           stability: out.next.stability,
@@ -532,16 +596,22 @@ async function attemptRate(
       reviewedAt: now,
     });
 
-    // Bump session tallies.
-    const ratingKey = input.rating;
+    // Bump session tallies. Compute the new ratings JSON in JS to avoid
+    // the `jsonb_set(... text path ... )` casting trap.
+    const ratings = (session.ratings as Record<ReviewRating, number> | null) ?? {
+      again: 0,
+      hard: 0,
+      good: 0,
+      easy: 0,
+    };
+    ratings[input.rating] = (ratings[input.rating] ?? 0) + 1;
     const wasCorrect = input.rating !== "again";
     await tx
       .update(studySession)
       .set({
         cardsReviewed: sql`${studySession.cardsReviewed} + 1`,
         cardsCorrect: sql`${studySession.cardsCorrect} + ${wasCorrect ? 1 : 0}`,
-        ratings: sql`jsonb_set(${studySession.ratings}, ${`{${ratingKey}}`},
-          to_jsonb(COALESCE((${studySession.ratings} ->> ${ratingKey})::int, 0) + 1))`,
+        ratings,
       })
       .where(eq(studySession.id, input.sessionId));
 
@@ -588,8 +658,3 @@ function toSessionRow(row: typeof studySession.$inferSelect): SessionRow {
     },
   };
 }
-
-// Silence unused-import warnings while keeping the helpers in scope for
-// future endpoints (filter-by-archived, lookups against tenant_decks).
-void tenantDecks;
-void lt;
