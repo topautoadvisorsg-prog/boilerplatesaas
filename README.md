@@ -94,8 +94,8 @@ Rule-based scoring, **NOT** ML:
 | **1** | User-scoped billing refactor, plan rename, `tenant_settings`, plan limits redesigned for B2C | ✅ Shipped | v1.5 |
 | **2** | Region system: `regions` global + `user_regions` RLS, plan-tier capacity, seed | ✅ Shipped | v1.6 |
 | **3** | Content schema: hybrid global/tenant decks + cards, clone-on-edit, recall pipeline hooks | ✅ Shipped | v1.7 |
-| **4** | Study engine: FSRS, `user_card_state`, `study_session`, daily limit, streak cron | ⏭ **Next** | — |
-| **5** | Recommendation engine: rule-based scoring + 5-min cache | ⏳ Pending | — |
+| **4** | Study engine: FSRS, `user_card_state`, `study_session`, daily limit, streak cron | ✅ Shipped | v1.8 |
+| **5** | Recommendation engine: rule-based scoring + 5-min cache | ⏭ **Next** | — |
 | **6** | Tenant Admin CMS: deck/card editor, region toggles, access-tier picker | ⏳ Pending | — |
 | **7** | Customer frontend: Field Journal design system + 6 screens | ⏳ Pending | — |
 | **8** | Monetization wire-up: trial, paywalls, promo codes | ⏳ Pending | — |

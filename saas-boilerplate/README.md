@@ -54,6 +54,8 @@ lib/
     subscriptionService.ts        Stripe webhook handlers
     regionService.ts              region catalog + per-user selection (plan-gated)
     contentService.ts             hybrid deck/card layer (reference-by-default, clone-on-edit)
+    studyService.ts               FSRS study engine — sessions, ratings, daily cap
+    streakService.ts              tz-aware streak reconciliation (nightly cron)
 
   db/                             schema, drizzle client, withTenant() helper
   auth/                           current user, admin gating
@@ -101,6 +103,9 @@ sentry.{client,server,edge}.config.ts
 | `global_cards` | Platform-owned canonical cards | **No (global)** — readable by all tenants | `global_deck_id`, `card_type` (basic/image/audio/cloze), `front`, `back`, `image_url`, `audio_url`, `hints` jsonb, `payload` jsonb, `display_order`, `version`, `is_active` |
 | `tenant_decks` | Tenant fork OR tenant-original deck | Yes (RLS) | `tenant_id`, `global_deck_id` (nullable = tenant-original), `slug`, `name`, `region_id`, `access_tier`, `overridden_fields` jsonb (which columns have diverged), `is_published`, `is_archived`, `source_version`. Partial unique on `(tenant_id, global_deck_id)` prevents duplicate forks. |
 | `tenant_cards` | Tenant fork OR tenant-original card | Yes (RLS) | `tenant_id`, `tenant_deck_id`, `global_card_id` (nullable), `card_type`, `front`, `back`, `image_url`, `audio_url`, `hints` jsonb, `payload` jsonb, `overridden_fields` jsonb, `source_version` |
+| `user_card_state` | Per-user FSRS state for one card | Yes (RLS) | `tenant_id`, `user_id`, `card_ref`, `card_source` (global/tenant), `global_card_id` (lineage), `state`, `due`, `stability`, `difficulty`, `elapsed_days`, `scheduled_days`, `learning_steps`, `reps`, `lapses`, `last_review`, `version` (optimistic-lock). Unique `(tenant_id, user_id, card_ref)`. |
+| `study_session` | One row per study session | Yes (RLS) | `tenant_id`, `user_id`, `region_id`, `started_at`, `ended_at`, `cards_reviewed`, `cards_correct`, `ratings` jsonb |
+| `study_review` | Append-only rating log | Yes (RLS) | `tenant_id`, `user_id`, `session_id`, `card_state_id`, `rating` (again/hard/good/easy), `prev_state`, `next_state`, `elapsed_ms`, `reviewed_at` |
 
 ---
 
@@ -235,6 +240,24 @@ Each subsystem documented as: **what it does · where it lives · how to modify 
   - Force a re-sync on a fork → null out `tenant_decks.overridden_fields` (drops back to full inheritance) or delete the `tenant_decks` row (re-forks lazily on next edit).
   - Wire FSRS / study state → use the resolved `ResolvedCard.id` as the foreign key; the `global_card_id` link is preserved on tenant forks so study state can follow lineage in Phase 4.
 
+### 10. Study engine (FSRS) *(product layer — v1.8)*
+- **What**: Spaced-repetition study built on the open-source [`ts-fsrs`](https://github.com/open-spaced-repetition/ts-fsrs) scheduler. One `user_card_state` row per (user, card) carries the FSRS fields (`stability`, `difficulty`, `due`, `state`, `reps`, `lapses`, etc.) plus an optimistic-locking `version` column. Every rating writes the new state with `WHERE id = $id AND version = $old` and retries once on conflict. An append-only `study_review` log captures every rating for replay / analytics. Sessions live in `study_session` (active session resumed on re-open). The Free-tier 20-card daily cap is enforced by counting `study_review` rows for the UTC day. A nightly Inngest cron (`scheduleStreakReconcile`) fans out one `study/streak.reconcile` event per active user; `streakService.reconcileStreak` walks each user's local-day calendar using their `users.timezone` (IANA tz), so streaks DON'T break for users in non-UTC zones who study around midnight.
+- **Where**:
+  - `lib/db/schema.ts` — `user_card_state` (RLS), `study_session` (RLS), `study_review` (RLS, append-only), `fsrsStateEnum`, `fsrsRatingEnum`
+  - `lib/study/fsrs.ts` — pure-function FSRS wrapper (`emptyState`, `rate`) — no DB, no I/O, unit-testable
+  - `lib/services/studyService.ts` — `startSession`, `endSession`, `getNextCardForDeck`, `rateCard` (optimistic-CAS), `getDailyUsage`, `DailyLimitReachedError`, `NoActiveSessionError`, `StudyConcurrencyError`
+  - `lib/services/streakService.ts` — `reconcileStreak`, `listUsersNeedingReconcile`
+  - `lib/jobs/functions.ts` — `scheduleStreakReconcile` (cron `0 4 * * *`), `runStreakReconcile`
+  - `drizzle/rls.sql` — `ucs_tenant_isolation`, `ss_tenant_isolation`, `sr_tenant_isolation`
+  - `lib/audit/actions.ts` — `STUDY_*`, `STREAK_*`
+  - `tests/fsrs.test.ts`, `tests/streak.test.ts` — pure-function unit tests, run via `pnpm test:unit`
+- **How to modify**:
+  - Swap the scheduler → replace the body of `lib/study/fsrs.ts`; everything downstream is decoupled.
+  - Change the daily cap → edit `PlanLimits.dailyCardLimit` in `lib/config/billing.ts`. The cap is read at request time (no cache).
+  - Change streak rules → edit `streakService.reconcileStreak`. The cron + fan-out is decoupled.
+  - Move the cap to per-deck instead of global → switch `getDailyUsage` to a join over `study_review.card_state_id → user_card_state.card_ref → tenant_decks` or `global_decks`.
+  - Per-user retention target → pass `{ request_retention: 0.85 }` to `fsrs(...)` in `lib/study/fsrs.ts`.
+
 ---
 
 ## Quick start
@@ -358,6 +381,7 @@ pnpm db:push              # ⚠️ dev only — skip migration files, push schem
 pnpm db:rls               # apply Row-Level Security policies
 pnpm db:seed-regions      # seed/refresh the global regions catalog (idempotent)
 pnpm db:seed-content      # seed/refresh the global decks + cards catalog (idempotent)
+pnpm test:unit            # run pure-function unit tests (FSRS + streak helpers) — no DB needed
 
 pnpm inngest:dev          # local Inngest dev server (UI at http://localhost:8288)
 ```

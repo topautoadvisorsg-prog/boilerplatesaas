@@ -4,6 +4,7 @@
  */
 import {
   boolean,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -42,6 +43,8 @@ export const tenantStatusEnum = pgEnum("tenant_status", [
 export const cardTypeEnum = pgEnum("card_type", ["basic", "image", "audio", "cloze"]);
 export const accessTierEnum = pgEnum("access_tier", ["free", "pro", "premium"]);
 export const contentSourceEnum = pgEnum("content_source", ["global", "tenant"]);
+export const fsrsStateEnum = pgEnum("fsrs_state", ["new", "learning", "review", "relearning"]);
+export const fsrsRatingEnum = pgEnum("fsrs_rating", ["again", "hard", "good", "easy"]);
 
 /* ------------------------------------------------------------------ */
 /* users                                                               */
@@ -406,6 +409,128 @@ export const tenantCards = pgTable(
 );
 
 /* ------------------------------------------------------------------ */
+/* user_card_state — per-user, per-card FSRS state.                    */
+/*                                                                     */
+/* Card lineage:                                                       */
+/*   • If the user is studying a global card, `card_ref` = global_card */
+/*     id and `card_source` = 'global'.                                */
+/*   • If a tenant fork exists at the time of review, `card_ref` =     */
+/*     tenant_card id, `card_source` = 'tenant'. `global_card_id` is   */
+/*     ALWAYS populated when the card has upstream lineage so study    */
+/*     state survives a fork being created mid-stream (Phase 6).       */
+/*                                                                     */
+/* Optimistic locking: every update bumps `version`. The service layer */
+/* writes `WHERE version = $old AND id = $id` and retries on mismatch  */
+/* to avoid losing concurrent ratings on the same card.                */
+/* ------------------------------------------------------------------ */
+export const userCardState = pgTable(
+  "user_card_state",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** The resolved card id at the time of last review (global_card.id OR tenant_card.id). */
+    cardRef: uuid("card_ref").notNull(),
+    cardSource: contentSourceEnum("card_source").notNull(),
+    /** Always populated when the card has global lineage; null only for tenant-original cards. */
+    globalCardId: uuid("global_card_id").references(() => globalCards.id, { onDelete: "set null" }),
+    /** FSRS scheduling fields (mirror ts-fsrs Card). */
+    state: fsrsStateEnum("state").notNull().default("new"),
+    due: timestamp("due", { withTimezone: true }).notNull().defaultNow(),
+    stability: doublePrecision("stability").notNull().default(0),
+    difficulty: doublePrecision("difficulty").notNull().default(0),
+    elapsedDays: integer("elapsed_days").notNull().default(0),
+    scheduledDays: integer("scheduled_days").notNull().default(0),
+    learningSteps: integer("learning_steps").notNull().default(0),
+    reps: integer("reps").notNull().default(0),
+    lapses: integer("lapses").notNull().default(0),
+    lastReview: timestamp("last_review", { withTimezone: true }),
+    /** Optimistic-lock counter; incremented on every write. */
+    version: integer("version").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_card_state_user_card_idx").on(t.tenantId, t.userId, t.cardRef),
+    index("user_card_state_due_idx").on(t.tenantId, t.userId, t.due),
+    index("user_card_state_state_idx").on(t.tenantId, t.userId, t.state),
+    index("user_card_state_global_idx").on(t.globalCardId),
+  ],
+);
+
+/* ------------------------------------------------------------------ */
+/* study_session — one row per user study session (append-only).       */
+/* Enforces the daily card cap for Free users via aggregate queries.   */
+/* ------------------------------------------------------------------ */
+export const studySession = pgTable(
+  "study_session",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Region context at session start (the user's primary region, if any). */
+    regionId: uuid("region_id").references(() => regions.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    cardsReviewed: integer("cards_reviewed").notNull().default(0),
+    cardsCorrect: integer("cards_correct").notNull().default(0),
+    /** Per-rating tallies for analytics (again/hard/good/easy). */
+    ratings: jsonb("ratings").notNull().default(sql`'{"again":0,"hard":0,"good":0,"easy":0}'::jsonb`),
+  },
+  (t) => [
+    index("study_session_user_started_idx").on(t.tenantId, t.userId, t.startedAt),
+    index("study_session_active_idx")
+      .on(t.tenantId, t.userId)
+      .where(sql`ended_at IS NULL`),
+  ],
+);
+
+/* ------------------------------------------------------------------ */
+/* study_review — append-only log of every card rating.                */
+/* Drives the daily-cap aggregate, streak reconciliation, and any      */
+/* future analytics. Cheap to insert, cheap to count.                  */
+/* ------------------------------------------------------------------ */
+export const studyReview = pgTable(
+  "study_review",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => studySession.id, { onDelete: "cascade" }),
+    cardStateId: uuid("card_state_id")
+      .notNull()
+      .references(() => userCardState.id, { onDelete: "cascade" }),
+    rating: fsrsRatingEnum("rating").notNull(),
+    /** State BEFORE this review — for replay / debugging the scheduler. */
+    prevState: fsrsStateEnum("prev_state").notNull(),
+    /** State AFTER this review. */
+    nextState: fsrsStateEnum("next_state").notNull(),
+    /** ms the user spent on this card. */
+    elapsedMs: integer("elapsed_ms").notNull().default(0),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("study_review_user_reviewed_idx").on(t.tenantId, t.userId, t.reviewedAt),
+    index("study_review_session_idx").on(t.sessionId),
+    index("study_review_card_idx").on(t.cardStateId),
+  ],
+);
+
+/* ------------------------------------------------------------------ */
 /* invitations                                                         */
 /* ------------------------------------------------------------------ */
 export const invitations = pgTable(
@@ -539,4 +664,29 @@ export const tenantCardsRelations = relations(tenantCards, ({ one }) => ({
   tenant: one(tenants, { fields: [tenantCards.tenantId], references: [tenants.id] }),
   deck: one(tenantDecks, { fields: [tenantCards.tenantDeckId], references: [tenantDecks.id] }),
   source: one(globalCards, { fields: [tenantCards.globalCardId], references: [globalCards.id] }),
+}));
+
+export const userCardStateRelations = relations(userCardState, ({ one, many }) => ({
+  tenant: one(tenants, { fields: [userCardState.tenantId], references: [tenants.id] }),
+  user: one(users, { fields: [userCardState.userId], references: [users.id] }),
+  globalCard: one(globalCards, {
+    fields: [userCardState.globalCardId],
+    references: [globalCards.id],
+  }),
+  reviews: many(studyReview),
+}));
+
+export const studySessionRelations = relations(studySession, ({ one, many }) => ({
+  tenant: one(tenants, { fields: [studySession.tenantId], references: [tenants.id] }),
+  user: one(users, { fields: [studySession.userId], references: [users.id] }),
+  region: one(regions, { fields: [studySession.regionId], references: [regions.id] }),
+  reviews: many(studyReview),
+}));
+
+export const studyReviewRelations = relations(studyReview, ({ one }) => ({
+  session: one(studySession, { fields: [studyReview.sessionId], references: [studySession.id] }),
+  cardState: one(userCardState, {
+    fields: [studyReview.cardStateId],
+    references: [userCardState.id],
+  }),
 }));

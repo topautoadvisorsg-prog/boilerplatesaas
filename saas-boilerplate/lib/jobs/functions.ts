@@ -17,6 +17,7 @@ import {
   paymentFailedEmail,
 } from "@/lib/email/templates";
 import { getEnv } from "@/lib/env";
+import { listUsersNeedingReconcile, reconcileStreak } from "@/lib/services/streakService";
 
 const concurrency = { limit: 10 };
 const retries = 3;
@@ -298,6 +299,35 @@ export const propagateGlobalCardChange = inngest.createFunction(
   },
 );
 
+/* ------------------------------------------------------------------ */
+/* study/streak.cron — nightly fan-out, one event per active user.      */
+/* ------------------------------------------------------------------ */
+export const scheduleStreakReconcile = inngest.createFunction(
+  { id: "schedule-streak-reconcile", concurrency: { limit: 1 }, retries: 2 },
+  { cron: "0 4 * * *" }, // 04:00 UTC — covers all NA timezones near local midnight
+  async ({ step }) => {
+    const ids = await step.run("collect", () => listUsersNeedingReconcile());
+    if (ids.length === 0) return { dispatched: 0 };
+    await step.sendEvent(
+      "fan-out",
+      ids.map((userId) => ({ name: "study/streak.reconcile" as const, data: { userId } })),
+    );
+    return { dispatched: ids.length };
+  },
+);
+
+/* ------------------------------------------------------------------ */
+/* study/streak.reconcile — single user reconciliation.                */
+/* ------------------------------------------------------------------ */
+export const runStreakReconcile = inngest.createFunction(
+  { id: "run-streak-reconcile", concurrency, retries },
+  { event: "study/streak.reconcile" },
+  async ({ event, step }) => {
+    const { userId } = event.data;
+    return step.run("reconcile", () => reconcileStreak(userId));
+  },
+);
+
 export const functions = [
   sendWelcomeEmail,
   provisionTenant,
@@ -308,6 +338,8 @@ export const functions = [
   cleanupStripeEvents,
   propagateGlobalDeckChange,
   propagateGlobalCardChange,
+  scheduleStreakReconcile,
+  runStreakReconcile,
 ];
 
 // Silence unused import warning while keeping `inArray` available for future fan-out jobs.

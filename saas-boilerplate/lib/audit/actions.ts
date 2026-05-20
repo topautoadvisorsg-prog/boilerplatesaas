@@ -39,6 +39,14 @@ export const AUDIT_ACTIONS = {
   CONTENT_GLOBAL_DECK_UPDATED: "content.global_deck_updated",
   CONTENT_GLOBAL_CARD_UPDATED: "content.global_card_updated",
 
+  // Study (Phase 4)
+  STUDY_SESSION_STARTED: "study.session_started",
+  STUDY_SESSION_ENDED: "study.session_ended",
+  STUDY_CARD_RATED: "study.card_rated",
+  STUDY_DAILY_LIMIT_HIT: "study.daily_limit_hit",
+  STREAK_INCREMENTED: "study.streak_incremented",
+  STREAK_BROKEN: "study.streak_broken",
+
   // Admin
   ADMIN_TENANT_ACCESSED: "admin.tenant_accessed",
   ADMIN_USER_ACCESSED: "admin.user_accessed",

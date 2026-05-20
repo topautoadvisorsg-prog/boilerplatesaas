@@ -38,14 +38,21 @@
   - Inngest events `content/global.deck-changed` / `content/global.card-changed` + functions `propagateGlobalDeckChange` / `propagateGlobalCardChange` — bump `source_version` on every fork and act as the cache-invalidation hook for Phases 4-5
   - 10 new audit actions for content lifecycle
   - `scripts/seed-content.ts` (3 starter decks: PNW Conifers free / Rocky Mtn Mammals free / Desert SW Flora pro) wired as `pnpm db:seed-content`
+- ✅ **Phase 4** — Study engine (FSRS) + tz-aware streaks
+  - `ts-fsrs@^5.4.0` installed; wrapped in `lib/study/fsrs.ts` (pure functions, unit-testable, swappable)
+  - 3 new tables: `user_card_state` (with optimistic-locking `version` column), `study_session`, `study_review` (append-only); 2 new enums (`fsrs_state`, `fsrs_rating`); RLS policies for all three
+  - `studyService` (`startSession` / `endSession` / `getNextCardForDeck` / `rateCard` / `getDailyUsage`); single retry on optimistic CAS conflict; daily-cap enforced via `study_review` aggregate read at request time
+  - `streakService.reconcileStreak` uses `Intl.DateTimeFormat` with `users.timezone` (IANA tz) — no naive UTC math
+  - Inngest: `scheduleStreakReconcile` (cron `0 4 * * *`) + `runStreakReconcile` event handler
+  - 6 new audit actions; 16 pure-function unit tests in `tests/` runnable via `pnpm test:unit`
 
-## Quality gates after Phase 3
+## Quality gates after Phase 4
 - `tsc --noEmit`: **0 errors**
 - `eslint`: **0 errors, 0 warnings**
+- `pnpm test:unit`: **16 / 16 passed** (10 FSRS + 6 streak helpers)
 - Branding grep: clean
 
 ## Phase plan (remaining)
-- **Phase 4** — Study engine (FSRS, UserCardState, StudySession, daily limit, streak service) — 3-4d
 - **Phase 5** — Recommendation engine — 1d
 - **Phase 6** — Tenant Admin CMS (deck/card editor, region toggles, access tiers) — 2-3d
 - **Phase 7** — Customer-facing frontend (Field Journal design system + onboarding/home/study/library/progress/profile) — 5-7d

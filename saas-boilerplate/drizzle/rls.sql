@@ -84,6 +84,39 @@ CREATE POLICY tc_tenant_isolation ON tenant_cards
   WITH CHECK (tenant_id = app_current_tenant_id());
 
 -- ---------------------------------------------------------------------
+-- user_card_state (Phase 4: study engine)
+-- ---------------------------------------------------------------------
+ALTER TABLE user_card_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_card_state FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS ucs_tenant_isolation ON user_card_state;
+CREATE POLICY ucs_tenant_isolation ON user_card_state
+  USING (tenant_id = app_current_tenant_id())
+  WITH CHECK (tenant_id = app_current_tenant_id());
+
+-- ---------------------------------------------------------------------
+-- study_session
+-- ---------------------------------------------------------------------
+ALTER TABLE study_session ENABLE ROW LEVEL SECURITY;
+ALTER TABLE study_session FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS ss_tenant_isolation ON study_session;
+CREATE POLICY ss_tenant_isolation ON study_session
+  USING (tenant_id = app_current_tenant_id())
+  WITH CHECK (tenant_id = app_current_tenant_id());
+
+-- ---------------------------------------------------------------------
+-- study_review
+-- ---------------------------------------------------------------------
+ALTER TABLE study_review ENABLE ROW LEVEL SECURITY;
+ALTER TABLE study_review FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS sr_tenant_isolation ON study_review;
+CREATE POLICY sr_tenant_isolation ON study_review
+  USING (tenant_id = app_current_tenant_id())
+  WITH CHECK (tenant_id = app_current_tenant_id());
+
+-- ---------------------------------------------------------------------
 -- audit_logs (tenant_id is NULLABLE for global events; allow NULL rows
 -- to bypass the policy so admin/system writes still work).
 -- ---------------------------------------------------------------------

@@ -17,4 +17,8 @@ export type AppEvents = {
   "content/global.deck-changed": { data: { globalDeckId: string; version: number } };
   /** Fired when the platform updates a `global_cards` row. */
   "content/global.card-changed": { data: { globalCardId: string; version: number } };
+  /** Fan-out: reconcile a single user's streak. */
+  "study/streak.reconcile": { data: { userId: string } };
+  /** Nightly cron — emits one `study/streak.reconcile` per active user. */
+  "study/streak.cron": Record<string, never>;
 };

@@ -3,6 +3,53 @@
 All notable changes to the SaaS boilerplate are documented here.
 This project uses [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] — 2026-02-XX — Phase 4: Study engine (FSRS) + streak service
+
+### Added — Dependency
+- `ts-fsrs@^5.4.0` — open-source FSRS scheduler. Wrapped in `lib/study/fsrs.ts` so the algorithm is swappable without touching the service or the DB.
+
+### Added — Schema
+- New enums: `fsrs_state` (new/learning/review/relearning), `fsrs_rating` (again/hard/good/easy).
+- `user_card_state` (RLS): per-user, per-card FSRS state. Carries `state`, `due`, `stability`, `difficulty`, `elapsed_days`, `scheduled_days`, `learning_steps`, `reps`, `lapses`, `last_review`, plus a `version` column for optimistic locking. `card_ref` is the resolved card id (global OR tenant fork) at review time; `global_card_id` is always populated when there is upstream lineage so study state survives a tenant fork being created mid-stream. Unique on `(tenant_id, user_id, card_ref)`; indexed on `(tenant_id, user_id, due)` for the "what's due now?" lookup.
+- `study_session` (RLS): one row per session, with `started_at`, `ended_at`, `cards_reviewed`, `cards_correct`, per-rating tallies in a `ratings` jsonb. Partial index on `(tenant_id, user_id) WHERE ended_at IS NULL` makes the "resume my active session" lookup O(1).
+- `study_review` (RLS): append-only log of every rating — `rating`, `prev_state`, `next_state`, `elapsed_ms`, `reviewed_at`, FK to `studySession` + `userCardState`. Drives the daily-cap aggregate, streak reconciliation, and any future analytics.
+
+### Added — RLS
+- `ucs_tenant_isolation`, `ss_tenant_isolation`, `sr_tenant_isolation` policies in `drizzle/rls.sql`.
+
+### Added — Study engine (`lib/study/` + `lib/services/studyService.ts`)
+- `lib/study/fsrs.ts` — pure-function wrapper: `emptyState(now)`, `rate(current, rating, now)`. Type-safe `Grade` mapping, public `ReviewRating` / `ReviewState` tokens. No DB, no I/O — unit-testable.
+- `studyService.startSession(ctx)` — opens a session or resumes the active one. Sets `region_id` from the user's primary region.
+- `studyService.endSession(ctx, sessionId)` — idempotent close.
+- `studyService.getNextCardForDeck(ctx, deckId)` — due reviews first (oldest first), then unseen cards by `display_order`. Returns the resolved card + current persisted state + `daily_usage` summary. Throws `DailyLimitReachedError` if the user has hit the Free 20-card cap.
+- `studyService.rateCard(ctx, { sessionId, cardId, rating, elapsedMs })` — FSRS schedule → optimistic-CAS update of `user_card_state` (single retry on conflict) → append `study_review` → bump session tally via `jsonb_set`. Throws `DailyLimitReachedError`, `NoActiveSessionError`, `StudyConcurrencyError`.
+- `studyService.getDailyUsage(ctx)` — `{ reviewedToday, limit, remaining, capped }`.
+
+### Added — Streak service (`lib/services/streakService.ts`)
+- `reconcileStreak(userId)` — uses `Intl.DateTimeFormat` with the user's `users.timezone` (IANA tz) to compute "today" and "yesterday" in local time, then bumps / preserves / resets `users.streak_count` accordingly. Audits `STREAK_INCREMENTED` / `STREAK_BROKEN`.
+- `listUsersNeedingReconcile()` — returns user ids with a non-zero streak OR a review in the last 36 hours (covers every IANA tz offset).
+
+### Added — Inngest
+- New event types in `lib/jobs/client.ts`: `study/streak.cron`, `study/streak.reconcile`.
+- New functions in `lib/jobs/functions.ts`:
+  - `scheduleStreakReconcile` (cron `0 4 * * *` UTC, concurrency 1) — fans out one `study/streak.reconcile` event per active user.
+  - `runStreakReconcile` (event-triggered, concurrency 10, retries 3) — calls `streakService.reconcileStreak(userId)`.
+
+### Added — Audit actions
+- `STUDY_SESSION_STARTED`, `STUDY_SESSION_ENDED`, `STUDY_CARD_RATED`, `STUDY_DAILY_LIMIT_HIT`, `STREAK_INCREMENTED`, `STREAK_BROKEN`.
+
+### Added — Tests
+- `tests/fsrs.test.ts` — 10 pure-function assertions on the FSRS wrapper (empty state shape, Good/Again/Easy ratings, scheduling monotonicity).
+- `tests/streak.test.ts` — 6 assertions on the timezone day-boundary contract (UTC vs LA vs Tokyo, year roll-over edge cases).
+- Wired as `pnpm test:unit`. Runs in <1s, no DB needed. Both suites pass on every commit.
+
+### Notes — Architectural decisions
+- **Optimistic locking, not pessimistic**: every rating writes `WHERE version = $old`; conflicts retry once then surface `StudyConcurrencyError`. Avoids row locks on the hot path.
+- **Daily cap reads at request time** — no cache. Cheap (`COUNT(*) WHERE reviewed_at >= today_start`), and the right answer is always the right answer.
+- **Append-only `study_review`** — never updated, never deleted. Doubles as the scheduler's audit trail.
+- **Streak math out of the hot path** — every `rateCard` would otherwise need a tz-aware "was yesterday a study day?" check. Deferring to a nightly cron is correct because streaks are a *display* concern, not a *blocking* concern.
+- **`card_ref` not a FK** — content can live in either `global_cards` or `tenant_cards`. Enforcing a FK across both is awkward; we store the resolved id and validate it via `findCardLineage()` on every rating, which also pulls `globalCardId` for lineage.
+
 ## [1.7.0] — 2026-02-XX — Phase 3: Content schema + recall pipeline
 
 ### Added — Schema (hybrid content model)
